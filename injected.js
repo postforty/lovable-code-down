@@ -22,9 +22,9 @@
       );
     }
 
-    // 2. Active file full code extraction request (Monaco Editor direct getValue())
+    // 2. Active file full code extraction request (Monaco Editor direct getValue() & React Fiber)
     if (event.data.type === "LCD_REQUEST_ACTIVE_CODE") {
-      const code = getFullMonacoCode(event.data.filePath);
+      const code = getFullActiveFileCode(event.data.filePath);
       window.postMessage(
         {
           type: "LCD_RESPONSE_ACTIVE_CODE",
@@ -36,25 +36,24 @@
     }
   });
 
-  // Extract complete un-truncated code from Monaco Editor API
-  function getFullMonacoCode(targetPath) {
+  // Extract complete un-truncated code from Monaco Editor API or React Fiber
+  function getFullActiveFileCode(targetPath) {
     try {
-      // 1. Try window.monaco editor models
+      // 1. Try window.monaco editor models (Global Model API)
       if (window.monaco && window.monaco.editor) {
         if (window.monaco.editor.getModels) {
           const models = window.monaco.editor.getModels();
           if (models && models.length > 0) {
-            // Find model by path match
             if (targetPath) {
               const matchedModel = models.find((m) => {
                 const p = m.uri ? m.uri.path || m.uri.fsPath || "" : "";
                 return p.endsWith(targetPath) || targetPath.endsWith(p.replace(/^\//, ""));
               });
-              if (matchedModel) {
+              if (matchedModel && matchedModel.getValue) {
                 return matchedModel.getValue();
               }
             }
-            // Fallback: active or latest model
+            // Fallback: latest active model
             const lastModel = models[models.length - 1];
             if (lastModel && lastModel.getValue) {
               return lastModel.getValue();
@@ -62,7 +61,7 @@
           }
         }
 
-        // 2. Try window.monaco active editors
+        // 2. Try active Monaco editors
         if (window.monaco.editor.getEditors) {
           const editors = window.monaco.editor.getEditors();
           if (editors && editors.length > 0) {
@@ -76,26 +75,45 @@
         }
       }
 
-      // 3. Try finding Monaco editor instance via React Fiber on .monaco-editor element
-      const monacoEl = document.querySelector(".monaco-editor");
-      if (monacoEl) {
-        const fiberKey = Object.keys(monacoEl).find((k) => k.startsWith("__reactFiber$"));
+      // 3. Try React Fiber on .code-editor-wrapper and .monaco-editor
+      const targets = [
+        document.querySelector(".code-editor-wrapper"),
+        document.querySelector(".monaco-editor"),
+        document.querySelector("[data-testid='code-editor']"),
+        document.querySelector("main"),
+      ].filter(Boolean);
+
+      for (const el of targets) {
+        const fiberKey = Object.keys(el).find(
+          (k) => k.startsWith("__reactFiber$") || k.startsWith("__reactContainer$")
+        );
         if (fiberKey) {
-          let fiber = monacoEl[fiberKey];
-          for (let i = 0; i < 15 && fiber; i++) {
+          let fiber = el[fiberKey];
+          for (let i = 0; i < 25 && fiber; i++) {
             const props = fiber.memoizedProps;
-            if (props && props.editor && props.editor.getValue) {
-              return props.editor.getValue();
+            if (props) {
+              if (typeof props.code === "string" && props.code.length > 0) return props.code;
+              if (typeof props.content === "string" && props.content.length > 0) return props.content;
+              if (typeof props.value === "string" && props.value.length > 0) return props.value;
+              if (props.file && typeof props.file.content === "string") return props.file.content;
+              if (props.editor && props.editor.getValue) return props.editor.getValue();
             }
-            if (props && props.value && typeof props.value === "string") {
-              return props.value;
+
+            // Check memoized state hooks
+            let stateNode = fiber.memoizedState;
+            while (stateNode) {
+              if (typeof stateNode.memoizedState === "string" && stateNode.memoizedState.length > 50) {
+                return stateNode.memoizedState;
+              }
+              stateNode = stateNode.next;
             }
+
             fiber = fiber.return;
           }
         }
       }
     } catch (e) {
-      console.warn("[LCD] getFullMonacoCode error:", e);
+      console.warn("[LCD] getFullActiveFileCode error:", e);
     }
 
     return null;
