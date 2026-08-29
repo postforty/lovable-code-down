@@ -1,0 +1,64 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Lovable Code Downloader</title>
+  <link rel="stylesheet" href="popup.css">
+</head>
+<body>
+  <div class="container">
+    <header class="header">
+      <div class="logo">
+        <div class="icon-wrap">
+          <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5">
+            <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/>
+            <polyline points="7 10 12 15 17 10"/>
+            <line x1="12" y1="15" x2="12" y2="3"/>
+          </svg>
+        </div>
+        <div>
+          <h1>Lovable Downloader</h1>
+          <p class="subtitle">v1.0.0</p>
+        </div>
+      </div>
+      <div class="badge" id="status-badge">대기</div>
+    </header>
+
+    <main class="main">
+      <div class="card" id="project-card">
+        <div class="card-label">현재 프로젝트</div>
+        <div class="project-name" id="project-name">감지 중...</div>
+      </div>
+
+      <div class="alert" id="lovable-alert" style="display: none;">
+        <span>ℹ Lovable(lovable.dev) 페이지에서 실행해 주세요.</span>
+      </div>
+
+      <button id="download-btn" class="btn-primary">
+        <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2">
+          <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/>
+          <polyline points="7 10 12 15 17 10"/>
+          <line x1="12" y1="15" x2="12" y2="3"/>
+        </svg>
+        <span>전체 소스코드 ZIP 다운로드</span>
+      </button>
+
+      <div class="instructions">
+        <h3>💡 사용 팁</h3>
+        <ul>
+          <li>화면 중앙의 <code>&lt;/&gt; 코드</code> 탭이 켜져 있을 때 가장 정확하게 수집됩니다.</li>
+          <li>수집 시작 시 자동으로 폴더를 펼치고 파일을 압축합니다.</li>
+          <li>웹페이지 우측 하단의 플로팅 버튼으로도 언제든 다운로드할 수 있습니다.</li>
+        </ul>
+      </div>
+    </main>
+
+    <footer class="footer">
+      <span>Lovable Code Downloader Extension</span>
+    </footer>
+  </div>
+
+  <script src="popup.js"></script>
+</body>
+</html>

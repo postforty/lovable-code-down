@@ -1,0 +1,60 @@
+{
+  "manifest_version": 3,
+  "name": "Lovable Code Downloader",
+  "version": "1.0.0",
+  "description": "Lovable(lovable.dev) 프로젝트의 모든 소스 코드를 원클릭으로 ZIP 파일로 다운로드합니다.",
+  "permissions": [
+    "activeTab",
+    "scripting",
+    "downloads",
+    "storage"
+  ],
+  "host_permissions": [
+    "https://lovable.dev/*",
+    "https://*.lovable.app/*"
+  ],
+  "action": {
+    "default_popup": "popup/popup.html",
+    "default_icon": {
+      "16": "icons/icon16.png",
+      "48": "icons/icon48.png",
+      "128": "icons/icon128.png"
+    }
+  },
+  "icons": {
+    "16": "icons/icon16.png",
+    "48": "icons/icon48.png",
+    "128": "icons/icon128.png"
+  },
+  "content_scripts": [
+    {
+      "matches": [
+        "https://lovable.dev/*",
+        "https://*.lovable.app/*"
+      ],
+      "js": [
+        "lib/jszip.min.js",
+        "content.js"
+      ],
+      "css": [
+        "content.css"
+      ],
+      "run_at": "document_idle"
+    }
+  ],
+  "background": {
+    "service_worker": "background.js"
+  },
+  "web_accessible_resources": [
+    {
+      "resources": [
+        "lib/jszip.min.js",
+        "icons/*"
+      ],
+      "matches": [
+        "https://lovable.dev/*",
+        "https://*.lovable.app/*"
+      ]
+    }
+  ]
+}
