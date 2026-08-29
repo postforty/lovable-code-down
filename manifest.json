@@ -2,7 +2,7 @@
   "manifest_version": 3,
   "name": "Lovable Code Downloader",
   "version": "1.1.0",
-  "description": "Lovable(lovable.dev) 프로젝트의 모든 소스 코드를 원클릭으로 ZIP 파일로 다운로드합니다.",
+  "description": "Lovable(lovable.dev) 프로젝트의 모든 소스 코드를 원클릭으로 ZIP 파일로 다운로드합니다. (비공식 헬퍼 도구)",
   "permissions": [
     "activeTab",
     "scripting",
