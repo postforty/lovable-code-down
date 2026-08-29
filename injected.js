@@ -1,10 +1,36 @@
 /**
- * Lovable Code Downloader - Injected Script (Runs in page context)
- * Directly inspects React Fiber, Zustand/Redux stores, and Monaco instances.
+ * Lovable Code Downloader - Injected Script (v1.0.6)
+ * Validates real source code strings and inspects React state, TanStack Query, and Monaco models.
  */
 
 (function () {
   console.log("⚡ Lovable Injected Script active in main page context.");
+
+  // Helper to validate whether a string is actual source code (and NOT UI layout flags like "horizontal")
+  function isValidCode(str, fileName) {
+    if (typeof str !== "string") return false;
+    const trimmed = str.trim();
+    if (trimmed.length === 0) return false;
+
+    // Reject UI layout / state tokens
+    const bannedKeywords = [
+      "horizontal", "vertical", "auto", "default", "codeEditor", "preview",
+      "both", "left", "right", "top", "bottom", "ltr", "rtl", "open", "closed"
+    ];
+    if (bannedKeywords.includes(trimmed.toLowerCase())) return false;
+
+    // If it's a JSON file, should start with { or [
+    if (fileName && fileName.endsWith(".json")) {
+      return trimmed.startsWith("{") || trimmed.startsWith("[");
+    }
+
+    // Code usually has newlines, or code tokens
+    if (trimmed.includes("\n") || trimmed.includes(";") || trimmed.startsWith("<") || trimmed.startsWith("{") || trimmed.startsWith("import") || trimmed.startsWith("export")) {
+      return true;
+    }
+
+    return trimmed.length > 15;
+  }
 
   // Listen for extraction requests from content script
   window.addEventListener("message", async (event) => {
@@ -22,7 +48,7 @@
       );
     }
 
-    // 2. Active file full code extraction request (Monaco Editor direct getValue() & React Fiber)
+    // 2. Active file full code extraction request
     if (event.data.type === "LCD_REQUEST_ACTIVE_CODE") {
       const code = getFullActiveFileCode(event.data.filePath);
       window.postMessage(
@@ -50,13 +76,14 @@
                 return p.endsWith(targetPath) || targetPath.endsWith(p.replace(/^\//, ""));
               });
               if (matchedModel && matchedModel.getValue) {
-                return matchedModel.getValue();
+                const val = matchedModel.getValue();
+                if (isValidCode(val, targetPath)) return val;
               }
             }
-            // Fallback: latest active model
-            const lastModel = models[models.length - 1];
-            if (lastModel && lastModel.getValue) {
-              return lastModel.getValue();
+            // Fallback: active or latest model
+            for (let i = models.length - 1; i >= 0; i--) {
+              const val = models[i].getValue();
+              if (isValidCode(val, targetPath)) return val;
             }
           }
         }
@@ -68,17 +95,18 @@
             for (const ed of editors) {
               const model = ed.getModel && ed.getModel();
               if (model && model.getValue) {
-                return model.getValue();
+                const val = model.getValue();
+                if (isValidCode(val, targetPath)) return val;
               }
             }
           }
         }
       }
 
-      // 3. Try React Fiber on .code-editor-wrapper and .monaco-editor
+      // 3. Try React Fiber on .monaco-editor, .code-editor-wrapper, and main
       const targets = [
-        document.querySelector(".code-editor-wrapper"),
         document.querySelector(".monaco-editor"),
+        document.querySelector(".code-editor-wrapper"),
         document.querySelector("[data-testid='code-editor']"),
         document.querySelector("main"),
       ].filter(Boolean);
@@ -89,20 +117,24 @@
         );
         if (fiberKey) {
           let fiber = el[fiberKey];
-          for (let i = 0; i < 25 && fiber; i++) {
+          for (let i = 0; i < 30 && fiber; i++) {
             const props = fiber.memoizedProps;
             if (props) {
-              if (typeof props.code === "string" && props.code.length > 0) return props.code;
-              if (typeof props.content === "string" && props.content.length > 0) return props.content;
-              if (typeof props.value === "string" && props.value.length > 0) return props.value;
-              if (props.file && typeof props.file.content === "string") return props.file.content;
-              if (props.editor && props.editor.getValue) return props.editor.getValue();
+              if (isValidCode(props.code, targetPath)) return props.code;
+              if (isValidCode(props.content, targetPath)) return props.content;
+              if (isValidCode(props.value, targetPath)) return props.value;
+              if (props.file && isValidCode(props.file.content, targetPath)) return props.file.content;
+              if (props.file && isValidCode(props.file.value, targetPath)) return props.file.value;
+              if (props.editor && props.editor.getValue) {
+                const val = props.editor.getValue();
+                if (isValidCode(val, targetPath)) return val;
+              }
             }
 
             // Check memoized state hooks
             let stateNode = fiber.memoizedState;
             while (stateNode) {
-              if (typeof stateNode.memoizedState === "string" && stateNode.memoizedState.length > 50) {
+              if (typeof stateNode.memoizedState === "string" && isValidCode(stateNode.memoizedState, targetPath)) {
                 return stateNode.memoizedState;
               }
               stateNode = stateNode.next;
@@ -119,6 +151,7 @@
     return null;
   }
 
+  // Bulk scan for files across React Fiber, TanStack Query Cache, and IndexedDB
   async function extractFilesFromPageState() {
     const files = {};
 
@@ -130,7 +163,7 @@
           models.forEach((m) => {
             const path = (m.uri && m.uri.path ? m.uri.path : "").replace(/^\//, "");
             const val = m.getValue();
-            if (path && val) {
+            if (path && isValidCode(val, path)) {
               files[path] = val;
             }
           });
@@ -140,7 +173,7 @@
       console.warn("[LCD] Monaco scan error:", e);
     }
 
-    // 2. Try scanning React Fiber Tree for file data structures
+    // 2. Try scanning React Fiber Tree for full file data structures
     try {
       const rootEl = document.querySelector("#root") || document.querySelector("body > div");
       if (rootEl) {
@@ -177,7 +210,6 @@
     if (!fiber || depth > 25 || visited.has(fiber)) return null;
     visited.add(fiber);
 
-    // Check props, state, and memoizedState
     const candidates = [
       fiber.memoizedProps,
       fiber.memoizedState,
@@ -199,6 +231,21 @@
           const stateFiles = checkObjectForFiles(state);
           if (stateFiles && Object.keys(stateFiles).length >= 3) {
             return stateFiles;
+          }
+        } catch (_) {}
+      }
+
+      // Check TanStack Query / React Query Client
+      if (obj.getQueryCache && typeof obj.getQueryCache === "function") {
+        try {
+          const queries = obj.getQueryCache().getAll();
+          for (const q of queries) {
+            if (q.state && q.state.data) {
+              const queryFiles = checkObjectForFiles(q.state.data);
+              if (queryFiles && Object.keys(queryFiles).length >= 3) {
+                return queryFiles;
+              }
+            }
           }
         } catch (_) {}
       }
@@ -229,13 +276,13 @@
       let validCount = 0;
       for (const k of fileKeys) {
         const val = obj[k];
-        if (typeof val === "string") {
+        if (typeof val === "string" && isValidCode(val, k)) {
           result[k] = val;
           validCount++;
-        } else if (val && typeof val.content === "string") {
+        } else if (val && typeof val.content === "string" && isValidCode(val.content, k)) {
           result[k] = val.content;
           validCount++;
-        } else if (val && typeof val.value === "string") {
+        } else if (val && typeof val.value === "string" && isValidCode(val.value, k)) {
           result[k] = val.value;
           validCount++;
         }
@@ -243,7 +290,7 @@
       if (validCount >= 3) return result;
     }
 
-    const nestedProps = ["files", "projectFiles", "fileTree", "fileMap", "sources", "documents"];
+    const nestedProps = ["files", "projectFiles", "fileTree", "fileMap", "sources", "documents", "project", "data"];
     for (const prop of nestedProps) {
       if (obj[prop] && typeof obj[prop] === "object") {
         const nestedRes = checkObjectForFiles(obj[prop]);
@@ -272,8 +319,8 @@
             const records = await getAllFromStore(db, storeName);
             for (const item of records) {
               if (!item) continue;
-              if (item.path && (item.content || item.value)) {
-                files[item.path] = item.content || item.value;
+              if (item.path && item.content && isValidCode(item.content, item.path)) {
+                files[item.path] = item.content;
               }
             }
           } catch (_) {}

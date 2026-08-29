@@ -1,5 +1,5 @@
 /**
- * Lovable Code Downloader - Content Script (v1.0.5)
+ * Lovable Code Downloader - Content Script (v1.0.6)
  * Virtualized Shadow DOM Tree Crawler & Full Monaco Editor Extractor.
  */
 
@@ -443,7 +443,7 @@
       try {
         btn.scrollIntoView({ block: "center" });
         btn.click();
-        await sleep(220); // Wait for Monaco model to load
+        await sleep(240); // Wait for Monaco model/editor to load
 
         const isImage = /\.(jpg|jpeg|png|webp|gif|ico|svg)$/i.test(cleanPath);
         if (isImage) {
@@ -451,7 +451,7 @@
           files[cleanPath] = imgContent || "// Image asset";
           addLog(`✔ [이미지] ${cleanPath}`, "info");
         } else {
-          // Extract full un-truncated source code from Monaco Editor Model API
+          // Extract full un-truncated source code
           const content = await getFullEditorContent(cleanPath);
           files[cleanPath] = content;
           addLog(`✔ ${cleanPath} (${content.length} chars)`, "info");
@@ -475,7 +475,7 @@
     return null;
   }
 
-  // Request complete code from injected script (Monaco Editor Model API)
+  // Request complete code from injected script (Monaco Editor Model API / React Fiber)
   function requestActiveCodeFromInjected(filePath) {
     return new Promise((resolve) => {
       const reqId = "req_" + Math.random().toString(36).substr(2, 9);
@@ -497,19 +497,31 @@
     });
   }
 
+  function isValidCodeString(str, fileName) {
+    if (typeof str !== "string") return false;
+    const trimmed = str.trim();
+    if (trimmed.length === 0) return false;
+    const bannedKeywords = ["horizontal", "vertical", "auto", "default", "codeeditor", "preview", "both"];
+    if (bannedKeywords.includes(trimmed.toLowerCase())) return false;
+    if (fileName && fileName.endsWith(".json")) {
+      return trimmed.startsWith("{") || trimmed.startsWith("[");
+    }
+    return trimmed.includes("\n") || trimmed.includes(";") || trimmed.startsWith("<") || trimmed.startsWith("{") || trimmed.length > 15;
+  }
+
   // Extract full editor content without truncation
   async function getFullEditorContent(filePath) {
     let retries = 6;
     while (retries > 0) {
       // 1. Direct Monaco API via Injected Script (Zero-truncation guaranteed)
       const directCode = await requestActiveCodeFromInjected(filePath);
-      if (directCode && directCode.trim().length > 0) {
+      if (isValidCodeString(directCode, filePath)) {
         return directCode;
       }
 
       // 2. DOM fallback
-      const domCode = readEditorContentDOM();
-      if (domCode && domCode.trim().length > 0) {
+      const domCode = readEditorContentDOM(filePath);
+      if (isValidCodeString(domCode, filePath)) {
         return domCode;
       }
 
@@ -517,45 +529,51 @@
       retries--;
     }
 
-    return (await requestActiveCodeFromInjected(filePath)) || readEditorContentDOM() || "";
+    const fallbackCode = (await requestActiveCodeFromInjected(filePath)) || readEditorContentDOM(filePath) || "";
+    return isValidCodeString(fallbackCode, filePath) ? fallbackCode : readEditorContentDOM(filePath) || "";
   }
 
   // Read editor content from DOM fallback
-  function readEditorContentDOM() {
+  function readEditorContentDOM(filePath) {
     // 1. Monaco Editor Models (if globally accessible)
     if (window.monaco && window.monaco.editor) {
       const models = window.monaco.editor.getModels();
       if (models && models.length > 0) {
-        return models[models.length - 1].getValue();
+        const val = models[models.length - 1].getValue();
+        if (isValidCodeString(val, filePath)) return val;
       }
     }
 
     // 2. Pre / Code block
     const codeTag = document.querySelector("main pre code, .code-viewer pre, pre code, pre");
     if (codeTag) {
-      return codeTag.textContent || "";
+      const val = codeTag.textContent || "";
+      if (isValidCodeString(val, filePath)) return val;
     }
 
     // 3. Textarea
     const textarea = document.querySelector(".monaco-editor textarea, main textarea");
     if (textarea && textarea.value) {
-      return textarea.value;
+      const val = textarea.value;
+      if (isValidCodeString(val, filePath)) return val;
     }
 
     // 4. Monaco Editor View Lines DOM
     const monacoLines = document.querySelectorAll(".monaco-editor .view-line");
     if (monacoLines && monacoLines.length > 0) {
-      return Array.from(monacoLines)
+      const val = Array.from(monacoLines)
         .map((l) => l.textContent || "")
         .join("\n");
+      if (isValidCodeString(val, filePath)) return val;
     }
 
     // 5. CodeMirror Lines
     const cmLines = document.querySelectorAll(".cm-line");
     if (cmLines && cmLines.length > 0) {
-      return Array.from(cmLines)
+      const val = Array.from(cmLines)
         .map((l) => l.textContent || "")
         .join("\n");
+      if (isValidCodeString(val, filePath)) return val;
     }
 
     return "";
