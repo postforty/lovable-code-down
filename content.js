@@ -1,6 +1,6 @@
 /**
- * Lovable Code Downloader - Content Script (v1.0.3)
- * Custom element <file-tree-container> Shadow DOM extractor & ZIP downloader.
+ * Lovable Code Downloader - Content Script (v1.0.4)
+ * Virtualized Shadow DOM Tree Crawler & ZIP Packager.
  */
 
 (function () {
@@ -57,7 +57,7 @@
       <span>코드 전체 다운로드 (ZIP)</span>
     `;
 
-    btn.title = "Lovable 프로젝트 소스코드 전체를 ZIP으로 다운로드합니다.";
+    btn.title = "Lovable 프로젝트의 전체 소스코드를 ZIP으로 다운로드합니다.";
     btn.addEventListener("click", startExtractionFlow);
     document.body.appendChild(btn);
   }
@@ -87,7 +87,7 @@
           </button>
         </div>
         <div class="lcd-modal-body">
-          <p id="lcd-modal-desc">Shadow DOM 파일 트리의 모든 폴더를 펼치고 소스코드를 ZIP으로 다운로드합니다.</p>
+          <p id="lcd-modal-desc">가상화 파일 트리를 스크롤하며 모든 폴더와 소스코드를 수집합니다.</p>
           <div class="lcd-progress-container">
             <div class="lcd-progress-bar-bg">
               <div class="lcd-progress-bar-fill" id="lcd-progress-fill"></div>
@@ -198,29 +198,31 @@
     if (logBox) logBox.innerHTML = "";
 
     updateProgress(0, "", "준비 중...");
-    addLog("Lovable 코드 일괄 다운로드 프로세스 시작", "info");
+    addLog("Lovable 전체 코드 수집 시작", "info");
 
     try {
       // 1. Ensure Code Tab is active
       await ensureCodeViewActive();
 
-      // 2. Find <file-tree-container> and get its Shadow Root
+      // 2. Locate Shadow Root
       const shadowRoot = await getTreeShadowRoot();
       if (!shadowRoot) {
-        throw new Error("<file-tree-container> 또는 Shadow Root를 찾을 수 없습니다. 코드 패널이 열려 있는지 확인해 주세요.");
+        throw new Error("<file-tree-container> Shadow Root를 찾을 수 없습니다. 코드 패널을 확인해 주세요.");
       }
 
-      addLog("✔ <file-tree-container> Shadow Root 접근 성공", "success");
+      const scrollContainer = findScrollContainer(shadowRoot);
+      addLog("✔ 가상화 탐색기(Shadow DOM) 연결 완료", "success");
 
-      // 3. Expand all folders in Shadow DOM
-      addLog("📁 파일 트리의 모든 폴더를 자동으로 여는 중...", "info");
-      await expandAllFoldersInShadowRoot(shadowRoot);
+      // 3. Step 1: Expand ALL folders with Virtual Scrolling
+      addLog("📁 가상화 트리를 스크롤하며 모든 폴더를 여는 중...", "info");
+      await expandAllFoldersWithScroll(shadowRoot, scrollContainer);
 
-      // 4. Collect all file items
-      const collectedFiles = await collectFilesFromShadowTree(shadowRoot);
+      // 4. Step 2: Collect ALL files with Virtual Scrolling
+      addLog("🔍 전체 파일 탐색 및 순차 수집 시작...", "info");
+      const collectedFiles = await collectAllFilesWithScroll(shadowRoot, scrollContainer);
 
       if (shouldAbort) {
-        addLog("작업이 사용자에 의해 중단되었습니다.", "warning");
+        addLog("수집 작업이 중단되었습니다.", "warning");
         return;
       }
 
@@ -229,8 +231,8 @@
         throw new Error("수집된 파일이 없습니다. 파일 목록을 다시 확인해 주세요.");
       }
 
-      addLog(`✨ 총 ${fileCount}개 파일 수집 완료! ZIP 압축 중...`, "success");
-      updateProgress(90, "", "ZIP 압축 생성 중...");
+      addLog(`✨ 총 ${fileCount}개 파일 완벽 수집 완료! ZIP 압축 중...`, "success");
+      updateProgress(90, "", "ZIP 파일 패키징 중...");
 
       // 5. Generate ZIP
       const zip = new JSZip();
@@ -260,7 +262,7 @@
       }, 3000);
 
       updateProgress(100, fileName, "다운로드 완료!");
-      addLog(`🎉 성공: '${fileName}' 다운로드가 완료되었습니다!`, "success");
+      addLog(`🎉 성공: '${fileName}' 전체 파일 다운로드가 완료되었습니다!`, "success");
       showToast(`🎉 '${fileName}' 다운로드가 시작되었습니다!`);
     } catch (err) {
       console.error("[Lovable Code Downloader]", err);
@@ -301,89 +303,162 @@
       if (el && el.shadowRoot) {
         return el.shadowRoot;
       }
-      // If shadowRoot not directly attached, check child templates or querySelector
-      if (el) {
-        const shadow = el.shadowRoot || el;
-        return shadow;
-      }
+      if (el) return el.shadowRoot || el;
       await sleep(200);
     }
     return null;
   }
 
-  // Expand all folder buttons in Shadow DOM
-  async function expandAllFoldersInShadowRoot(shadowRoot) {
-    let hasMoreToOpen = true;
-    let passes = 0;
+  // Find scrollable container inside Shadow DOM or host
+  function findScrollContainer(shadowRoot) {
+    const scrollEl =
+      shadowRoot.querySelector("[data-file-tree-virtualized-scroll='true']") ||
+      shadowRoot.querySelector("[role='tree']") ||
+      shadowRoot.querySelector("div[style*='overflow']") ||
+      shadowRoot.firstElementChild;
 
-    while (hasMoreToOpen && passes < 12) {
+    return scrollEl || document.body;
+  }
+
+  // Expand all folders while scrolling through the virtualized list
+  async function expandAllFoldersWithScroll(shadowRoot, scrollContainer) {
+    let hasOpenedNew = true;
+    let pass = 0;
+
+    while (hasOpenedNew && pass < 8) {
       if (shouldAbort) break;
-      passes++;
-      hasMoreToOpen = false;
+      pass++;
+      hasOpenedNew = false;
 
-      // Select all folder buttons with aria-expanded="false"
-      const closedFolders = Array.from(
-        shadowRoot.querySelectorAll("button[data-item-type='folder'][aria-expanded='false']")
-      );
+      // Scroll from top to bottom
+      scrollContainer.scrollTop = 0;
+      await sleep(100);
 
-      for (const btn of closedFolders) {
+      let maxScroll = scrollContainer.scrollHeight - scrollContainer.clientHeight;
+      let currentScroll = 0;
+      const step = 200;
+
+      while (currentScroll <= maxScroll + step) {
         if (shouldAbort) break;
-        const folderPath = btn.getAttribute("data-item-path") || btn.getAttribute("aria-label");
-        addLog(`📂 폴더 열기: ${folderPath}`, "info");
 
-        btn.scrollIntoView({ block: "nearest" });
-        btn.click();
-        hasMoreToOpen = true;
+        const closedFolders = Array.from(
+          shadowRoot.querySelectorAll("button[data-item-type='folder'][aria-expanded='false']")
+        );
+
+        for (const btn of closedFolders) {
+          const folderPath = btn.getAttribute("data-item-path") || btn.getAttribute("aria-label");
+          addLog(`📂 폴더 열기: ${folderPath}`, "info");
+
+          btn.scrollIntoView({ block: "nearest" });
+          btn.click();
+          hasOpenedNew = true;
+          await sleep(60);
+        }
+
+        currentScroll += step;
+        scrollContainer.scrollTop = currentScroll;
         await sleep(80);
+        maxScroll = scrollContainer.scrollHeight - scrollContainer.clientHeight;
       }
 
-      if (hasMoreToOpen) {
-        await sleep(150);
+      await sleep(150);
+    }
+
+    // Scroll back to top
+    scrollContainer.scrollTop = 0;
+    await sleep(150);
+  }
+
+  // Collect all files by scrolling through the virtualized tree
+  async function collectAllFilesWithScroll(shadowRoot, scrollContainer) {
+    const files = {};
+    const collectedPaths = new Set();
+
+    // Pass 1: Scroll from TOP to BOTTOM
+    scrollContainer.scrollTop = 0;
+    await sleep(100);
+
+    let maxScroll = scrollContainer.scrollHeight - scrollContainer.clientHeight;
+    let currentScroll = 0;
+    const step = 150; // Scroll by ~4 items at a time
+
+    while (currentScroll <= maxScroll + step * 2) {
+      if (shouldAbort) break;
+
+      await processVisibleFiles(shadowRoot, files, collectedPaths);
+
+      currentScroll += step;
+      scrollContainer.scrollTop = currentScroll;
+      await sleep(100);
+      maxScroll = scrollContainer.scrollHeight - scrollContainer.clientHeight;
+    }
+
+    // Pass 2: Scroll from BOTTOM to TOP to ensure no items missed
+    addLog("🔄 역방향 검증 스캔 중...", "info");
+    while (currentScroll >= -step) {
+      if (shouldAbort) break;
+
+      await processVisibleFiles(shadowRoot, files, collectedPaths);
+
+      currentScroll -= step;
+      scrollContainer.scrollTop = Math.max(0, currentScroll);
+      await sleep(80);
+    }
+
+    scrollContainer.scrollTop = 0;
+    return files;
+  }
+
+  // Process currently visible file buttons in Shadow DOM
+  async function processVisibleFiles(shadowRoot, files, collectedPaths) {
+    const visibleFileButtons = Array.from(
+      shadowRoot.querySelectorAll("button[data-item-type='file']")
+    );
+
+    for (const btn of visibleFileButtons) {
+      if (shouldAbort) break;
+
+      const rawPath = btn.getAttribute("data-item-path") || btn.getAttribute("aria-label");
+      if (!rawPath) continue;
+
+      const cleanPath = rawPath.replace(/^\//, "");
+      if (collectedPaths.has(cleanPath)) continue;
+
+      collectedPaths.add(cleanPath);
+      updateProgress(0, cleanPath, `파일 수집 중 (${collectedPaths.size}개 수집됨)`);
+
+      try {
+        btn.scrollIntoView({ block: "center" });
+        btn.click();
+        await sleep(220); // Wait for editor to update
+
+        const isImage = /\.(jpg|jpeg|png|webp|gif|ico|svg)$/i.test(cleanPath);
+        if (isImage) {
+          const imgContent = await tryGetImageContent();
+          files[cleanPath] = imgContent || "// Image asset";
+          addLog(`✔ [이미지] ${cleanPath}`, "info");
+        } else {
+          const content = await getEditorContentWithPolling();
+          files[cleanPath] = content;
+          addLog(`✔ ${cleanPath} (${content.length} chars)`, "info");
+        }
+      } catch (err) {
+        addLog(`⚠ ${cleanPath} 수집 실패: ${err.message}`, "warning");
+        files[cleanPath] = `// Error reading file: ${err.message}`;
       }
     }
   }
 
-  // Collect all files from Shadow Root tree items
-  async function collectFilesFromShadowTree(shadowRoot) {
-    const files = {};
-
-    // Discover all file buttons
-    const fileButtons = Array.from(
-      shadowRoot.querySelectorAll("button[data-item-type='file']")
-    );
-
-    addLog(`🔍 총 ${fileButtons.length}개의 소스코드 파일 발견됨`, "success");
-
-    const total = fileButtons.length;
-
-    for (let i = 0; i < total; i++) {
-      if (shouldAbort) break;
-
-      const btn = fileButtons[i];
-      const rawPath = btn.getAttribute("data-item-path") || btn.getAttribute("aria-label");
-      // Clean up path (remove leading slashes if any)
-      const cleanPath = rawPath.replace(/^\//, "");
-
-      updateProgress(((i + 1) / total) * 85, cleanPath, `파일 수집 중 (${i + 1}/${total})`);
-
+  // Handle image assets if rendered as <img>
+  async function tryGetImageContent() {
+    const imgEl = document.querySelector("main img, .code-viewer img, img[src*='blob:'], img[src*='http']");
+    if (imgEl && imgEl.src) {
       try {
-        // Scroll and click the file button to trigger editor rendering
-        btn.scrollIntoView({ block: "nearest" });
-        btn.click();
-
-        // Wait for Code Editor to load content
-        await sleep(250);
-
-        const content = await getEditorContentWithPolling();
-        files[cleanPath] = content;
-        addLog(`✔ ${cleanPath} (${content.length} chars)`, "info");
-      } catch (err) {
-        addLog(`⚠ ${cleanPath} 읽기 실패: ${err.message}`, "warning");
-        files[cleanPath] = `// Error reading file: ${err.message}`;
-      }
+        const res = await fetch(imgEl.src);
+        return await res.blob();
+      } catch (_) {}
     }
-
-    return files;
+    return null;
   }
 
   // Extract editor content with polling
