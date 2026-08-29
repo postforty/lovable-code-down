@@ -1,6 +1,6 @@
 /**
- * Lovable Code Downloader - Content Script (v1.0.7)
- * Uses official Lovable Copy Button & Monaco Model API to guarantee 100% complete source code without truncation.
+ * Lovable Code Downloader - Content Script (v1.0.8)
+ * High-fidelity code extractor using official Download button interception & Monaco API.
  */
 
 (function () {
@@ -21,19 +21,18 @@
     createProgressModal();
   }
 
-  // Inject script to access window.monaco / React Fiber in page context
+  // Inject script into main execution context
   function injectMainWorldScript() {
     try {
       const script = document.createElement("script");
       script.src = chrome.runtime.getURL("injected.js");
       (document.head || document.documentElement).appendChild(script);
-      script.onload = () => script.remove();
     } catch (e) {
       console.warn("[LCD] Main world injection error:", e);
     }
   }
 
-  // Get project name
+  // Project name
   function getProjectName() {
     const titleEl =
       document.querySelector("header h1, header h2") ||
@@ -100,7 +99,7 @@
           </button>
         </div>
         <div class="lcd-modal-body">
-          <p id="lcd-modal-desc">공식 복사 엔진 및 가상화 트리를 연동하여 100% 무손실 코드를 다운로드합니다.</p>
+          <p id="lcd-modal-desc">모든 파일의 원본 소스코드를 온전히 수집하여 ZIP으로 압축합니다.</p>
           <div class="lcd-progress-container">
             <div class="lcd-progress-bar-bg">
               <div class="lcd-progress-bar-fill" id="lcd-progress-fill"></div>
@@ -211,7 +210,7 @@
     if (logBox) logBox.innerHTML = "";
 
     updateProgress(0, "", "준비 중...");
-    addLog("Lovable 전체 코드 무손실 수집 프로세스 시작", "info");
+    addLog("Lovable 소스코드 무손실 추출 시작", "info");
 
     try {
       // 1. Ensure Code Tab is active
@@ -224,13 +223,13 @@
       }
 
       const scrollContainer = findScrollContainer(shadowRoot);
-      addLog("✔ 가상화 탐색기(Shadow DOM) 연결 완료", "success");
+      addLog("✔ Shadow DOM 탐색기 연결 완료", "success");
 
       // 3. Step 1: Expand ALL folders with Virtual Scrolling
-      addLog("📁 가상화 트리를 스크롤하며 모든 폴더를 여는 중...", "info");
+      addLog("📁 파일 트리의 모든 폴더를 여는 중...", "info");
       await expandAllFoldersWithScroll(shadowRoot, scrollContainer);
 
-      // 4. Step 2: Collect ALL files with Virtual Scrolling and official Copy button
+      // 4. Step 2: Collect ALL files with Virtual Scrolling
       addLog("🔍 전체 파일 탐색 및 무손실 코드 수집 시작...", "info");
       const collectedFiles = await collectAllFilesWithScroll(shadowRoot, scrollContainer);
 
@@ -244,7 +243,7 @@
         throw new Error("수집된 파일이 없습니다. 파일 목록을 다시 확인해 주세요.");
       }
 
-      addLog(`✨ 총 ${fileCount}개 파일 100% 무손실 수집 완료! ZIP 압축 중...`, "success");
+      addLog(`✨ 총 ${fileCount}개 파일 무손실 수집 완료! ZIP 압축 중...`, "success");
       updateProgress(90, "", "ZIP 파일 패키징 중...");
 
       // 5. Generate ZIP
@@ -343,7 +342,6 @@
       pass++;
       hasOpenedNew = false;
 
-      // Scroll from top to bottom
       scrollContainer.scrollTop = 0;
       await sleep(100);
 
@@ -377,7 +375,6 @@
       await sleep(150);
     }
 
-    // Scroll back to top
     scrollContainer.scrollTop = 0;
     await sleep(150);
   }
@@ -406,7 +403,7 @@
       maxScroll = scrollContainer.scrollHeight - scrollContainer.clientHeight;
     }
 
-    // Pass 2: Scroll from BOTTOM to TOP to ensure complete coverage
+    // Pass 2: Scroll from BOTTOM to TOP
     addLog("🔄 역방향 검증 스캔 중...", "info");
     while (currentScroll >= -step) {
       if (shouldAbort) break;
@@ -443,7 +440,7 @@
       try {
         btn.scrollIntoView({ block: "center" });
         btn.click();
-        await sleep(240); // Wait for tab & editor to load
+        await sleep(240); // Wait for file to load
 
         const isImage = /\.(jpg|jpeg|png|webp|gif|ico|svg)$/i.test(cleanPath);
         if (isImage) {
@@ -451,7 +448,7 @@
           files[cleanPath] = imgContent || "// Image asset";
           addLog(`✔ [이미지] ${cleanPath}`, "info");
         } else {
-          // Extract full un-truncated source code using Official Copy Button & Monaco API
+          // Extract full un-truncated source code
           const content = await getFullEditorContent(cleanPath);
           files[cleanPath] = content;
           addLog(`✔ ${cleanPath} (${content.length} chars)`, "info");
@@ -476,92 +473,39 @@
   }
 
   // ----------------------------------------------------
-  // Official Copy Button & Full Code Extraction Engine
+  // Full Code Extraction Pipeline
   // ----------------------------------------------------
 
-  // Find official Lovable Copy button on editor header
-  function findCopyButton() {
-    // 1. Find Download button and its previous sibling button (Copy icon)
-    const downloadBtn = Array.from(document.querySelectorAll("button")).find(
-      (b) => b.textContent.includes("Download") || b.textContent.includes("다운로드")
-    );
-    if (downloadBtn) {
-      if (downloadBtn.previousElementSibling && downloadBtn.previousElementSibling.tagName === "BUTTON") {
-        return downloadBtn.previousElementSibling;
-      }
-      const parentBtns = Array.from(downloadBtn.parentElement.querySelectorAll("button"));
-      const copyBtn = parentBtns.find((b) => b !== downloadBtn && !b.id.startsWith("lcd-"));
-      if (copyBtn) return copyBtn;
-    }
+  // Intercept official Lovable Download button
+  function requestInterceptDownloadClick() {
+    return new Promise((resolve) => {
+      const reqId = "req_" + Math.random().toString(36).substr(2, 9);
+      const timeout = setTimeout(() => {
+        window.removeEventListener("message", handler);
+        resolve(null);
+      }, 400);
 
-    // 2. Look by aria-label / title / testid
-    const copyBtnByAria = document.querySelector(
-      "button[aria-label*='Copy'], button[title*='Copy'], button[aria-label*='복사'], button[title*='복사'], button[data-testid*='copy']"
-    );
-    if (copyBtnByAria) return copyBtnByAria;
-
-    // 3. Look by SVG copy icon
-    const svgs = document.querySelectorAll("header button svg, .code-editor-wrapper button svg, main button svg");
-    for (const svg of svgs) {
-      if (svg.innerHTML.includes("rect") || svg.innerHTML.includes("copy") || svg.classList.contains("lucide-copy")) {
-        const btn = svg.closest("button");
-        if (btn && !btn.textContent.includes("Download") && !btn.id.startsWith("lcd-")) {
-          return btn;
+      function handler(event) {
+        if (event.data && event.data.type === "LCD_RESPONSE_INTERCEPT_DOWNLOAD" && event.data.reqId === reqId) {
+          clearTimeout(timeout);
+          window.removeEventListener("message", handler);
+          resolve(event.data.content);
         }
       }
-    }
 
-    return null;
+      window.addEventListener("message", handler);
+      window.postMessage({ type: "LCD_INTERCEPT_DOWNLOAD_CLICK", reqId }, "*");
+    });
   }
 
-  // Trigger Lovable official copy button and intercept 100% full clipboard text
-  async function getCodeViaOfficialCopyButton(filePath) {
-    const copyBtn = findCopyButton();
-    if (!copyBtn) return null;
-
-    let interceptedCode = null;
-
-    // Intercept standard copy event
-    const copyListener = (e) => {
-      if (e.clipboardData) {
-        interceptedCode = e.clipboardData.getData("text/plain");
-      }
-    };
-    document.addEventListener("copy", copyListener, { capture: true, once: true });
-
-    try {
-      copyBtn.click();
-      await sleep(120);
-
-      document.removeEventListener("copy", copyListener, { capture: true });
-
-      // Fallback: read directly from clipboard API
-      if (!interceptedCode && navigator.clipboard && navigator.clipboard.readText) {
-        try {
-          interceptedCode = await navigator.clipboard.readText();
-        } catch (_) {}
-      }
-
-      if (isValidCodeString(interceptedCode, filePath)) {
-        return interceptedCode;
-      }
-    } catch (e) {
-      console.warn("[LCD] Copy button trigger error:", e);
-    } finally {
-      document.removeEventListener("copy", copyListener, { capture: true });
-    }
-
-    return null;
-  }
-
-  // Request complete code from injected script (Monaco Editor Model API / React Fiber)
+  // Request code from Injected script (Monaco / React Fiber)
   function requestActiveCodeFromInjected(filePath) {
     return new Promise((resolve) => {
       const reqId = "req_" + Math.random().toString(36).substr(2, 9);
       const timeout = setTimeout(() => {
         window.removeEventListener("message", handler);
         resolve(null);
-      }, 500);
+      }, 400);
 
       function handler(event) {
         if (event.data && event.data.type === "LCD_RESPONSE_ACTIVE_CODE" && event.data.reqId === reqId) {
@@ -576,88 +520,90 @@
     });
   }
 
-  function isValidCodeString(str, fileName) {
-    if (typeof str !== "string") return false;
-    const trimmed = str.trim();
-    if (trimmed.length === 0) return false;
-    const bannedKeywords = ["horizontal", "vertical", "auto", "default", "codeeditor", "preview", "both"];
-    if (bannedKeywords.includes(trimmed.toLowerCase())) return false;
-    if (fileName && fileName.endsWith(".json")) {
-      return trimmed.startsWith("{") || trimmed.startsWith("[");
-    }
-    return trimmed.includes("\n") || trimmed.includes(";") || trimmed.startsWith("<") || trimmed.startsWith("{") || trimmed.length > 15;
-  }
-
   // Extract full editor content without truncation
   async function getFullEditorContent(filePath) {
-    // 1. Highest Priority: Official Lovable Copy Button (Guarantees 100% complete code without virtualization truncation)
-    const copyCode = await getCodeViaOfficialCopyButton(filePath);
-    if (copyCode && isValidCodeString(copyCode, filePath)) {
-      return copyCode;
+    // 1. Intercept official Lovable Download button click (Highest Fidelity)
+    const downloadedContent = await requestInterceptDownloadClick();
+    if (downloadedContent && typeof downloadedContent === "string" && downloadedContent.trim().length > 0) {
+      return downloadedContent;
     }
 
     // 2. Direct Monaco API via Injected Script
     const directCode = await requestActiveCodeFromInjected(filePath);
-    if (directCode && isValidCodeString(directCode, filePath)) {
+    if (directCode && typeof directCode === "string" && directCode.trim().length > 0) {
       return directCode;
     }
 
-    // 3. DOM fallback
-    const domCode = readEditorContentDOM(filePath);
-    if (domCode && isValidCodeString(domCode, filePath)) {
+    // 3. Monaco Editor DOM Line Accumulator (Scrolls editor to get all lines)
+    const domCode = await readEditorDOMWithScroll();
+    if (domCode && domCode.trim().length > 0) {
       return domCode;
     }
 
-    await sleep(150);
-    const retryCopy = await getCodeViaOfficialCopyButton(filePath);
-    if (retryCopy && isValidCodeString(retryCopy, filePath)) {
-      return retryCopy;
-    }
-
-    return (await requestActiveCodeFromInjected(filePath)) || readEditorContentDOM(filePath) || "";
+    return (await requestActiveCodeFromInjected(filePath)) || readEditorContentDOM() || "";
   }
 
-  // Read editor content from DOM fallback
-  function readEditorContentDOM(filePath) {
-    // 1. Monaco Editor Models (if globally accessible)
-    if (window.monaco && window.monaco.editor) {
-      const models = window.monaco.editor.getModels();
-      if (models && models.length > 0) {
-        const val = models[models.length - 1].getValue();
-        if (isValidCodeString(val, filePath)) return val;
+  // Read Monaco Editor DOM lines with auto-scroll
+  async function readEditorDOMWithScroll() {
+    const editorScroll = document.querySelector(".monaco-scrollable-element, .monaco-editor .overflow-guard, .code-editor-wrapper");
+    if (!editorScroll) return readEditorContentDOM();
+
+    const collectedLines = new Map(); // lineTop/lineIndex -> text
+
+    // Helper to capture currently visible lines
+    const captureVisibleLines = () => {
+      const lineEls = document.querySelectorAll(".monaco-editor .view-line");
+      for (const line of lineEls) {
+        const top = parseFloat(line.style.top) || line.offsetTop || 0;
+        const text = line.textContent || "";
+        collectedLines.set(top, text);
       }
+    };
+
+    captureVisibleLines();
+
+    // Scroll down if scrollable
+    const maxScroll = editorScroll.scrollHeight - editorScroll.clientHeight;
+    if (maxScroll > 50) {
+      for (let s = 0; s <= maxScroll + 200; s += 250) {
+        editorScroll.scrollTop = s;
+        await sleep(30);
+        captureVisibleLines();
+      }
+      editorScroll.scrollTop = 0;
+    }
+
+    if (collectedLines.size > 0) {
+      // Sort lines by vertical position
+      const sorted = Array.from(collectedLines.entries())
+        .sort((a, b) => a[0] - b[0])
+        .map((e) => e[1]);
+      return sorted.join("\n");
+    }
+
+    return readEditorContentDOM();
+  }
+
+  // Fallback DOM reader
+  function readEditorContentDOM() {
+    // 1. Monaco Editor View Lines
+    const monacoLines = document.querySelectorAll(".monaco-editor .view-line");
+    if (monacoLines && monacoLines.length > 0) {
+      return Array.from(monacoLines)
+        .map((l) => l.textContent || "")
+        .join("\n");
     }
 
     // 2. Pre / Code block
     const codeTag = document.querySelector("main pre code, .code-viewer pre, pre code, pre");
     if (codeTag) {
-      const val = codeTag.textContent || "";
-      if (isValidCodeString(val, filePath)) return val;
+      return codeTag.textContent || "";
     }
 
     // 3. Textarea
     const textarea = document.querySelector(".monaco-editor textarea, main textarea");
     if (textarea && textarea.value) {
-      const val = textarea.value;
-      if (isValidCodeString(val, filePath)) return val;
-    }
-
-    // 4. Monaco Editor View Lines DOM
-    const monacoLines = document.querySelectorAll(".monaco-editor .view-line");
-    if (monacoLines && monacoLines.length > 0) {
-      const val = Array.from(monacoLines)
-        .map((l) => l.textContent || "")
-        .join("\n");
-      if (isValidCodeString(val, filePath)) return val;
-    }
-
-    // 5. CodeMirror Lines
-    const cmLines = document.querySelectorAll(".cm-line");
-    if (cmLines && cmLines.length > 0) {
-      const val = Array.from(cmLines)
-        .map((l) => l.textContent || "")
-        .join("\n");
-      if (isValidCodeString(val, filePath)) return val;
+      return textarea.value;
     }
 
     return "";
