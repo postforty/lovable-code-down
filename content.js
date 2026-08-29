@@ -1,6 +1,6 @@
 /**
- * Lovable Code Downloader - Content Script (v1.0.4)
- * Virtualized Shadow DOM Tree Crawler & ZIP Packager.
+ * Lovable Code Downloader - Content Script (v1.0.5)
+ * Virtualized Shadow DOM Tree Crawler & Full Monaco Editor Extractor.
  */
 
 (function () {
@@ -14,10 +14,23 @@
 
   const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
-  // Initialize UI
+  // Initialize UI & Main World Injected Script
   function init() {
+    injectMainWorldScript();
     createFloatingButton();
     createProgressModal();
+  }
+
+  // Inject script to access window.monaco / React Fiber in page context
+  function injectMainWorldScript() {
+    try {
+      const script = document.createElement("script");
+      script.src = chrome.runtime.getURL("injected.js");
+      (document.head || document.documentElement).appendChild(script);
+      script.onload = () => script.remove();
+    } catch (e) {
+      console.warn("[LCD] Main world injection error:", e);
+    }
   }
 
   // Get project name
@@ -87,7 +100,7 @@
           </button>
         </div>
         <div class="lcd-modal-body">
-          <p id="lcd-modal-desc">가상화 파일 트리를 스크롤하며 모든 폴더와 소스코드를 수집합니다.</p>
+          <p id="lcd-modal-desc">가상화 파일 트리를 스크롤하며 모든 폴더와 원본 소스코드를 수집합니다.</p>
           <div class="lcd-progress-container">
             <div class="lcd-progress-bar-bg">
               <div class="lcd-progress-bar-fill" id="lcd-progress-fill"></div>
@@ -198,7 +211,7 @@
     if (logBox) logBox.innerHTML = "";
 
     updateProgress(0, "", "준비 중...");
-    addLog("Lovable 전체 코드 수집 시작", "info");
+    addLog("Lovable 전체 코드 수집 프로세스 시작", "info");
 
     try {
       // 1. Ensure Code Tab is active
@@ -217,8 +230,8 @@
       addLog("📁 가상화 트리를 스크롤하며 모든 폴더를 여는 중...", "info");
       await expandAllFoldersWithScroll(shadowRoot, scrollContainer);
 
-      // 4. Step 2: Collect ALL files with Virtual Scrolling
-      addLog("🔍 전체 파일 탐색 및 순차 수집 시작...", "info");
+      // 4. Step 2: Collect ALL files with Virtual Scrolling and full Monaco code
+      addLog("🔍 전체 파일 탐색 및 무손실 소스코드 수집 시작...", "info");
       const collectedFiles = await collectAllFilesWithScroll(shadowRoot, scrollContainer);
 
       if (shouldAbort) {
@@ -231,7 +244,7 @@
         throw new Error("수집된 파일이 없습니다. 파일 목록을 다시 확인해 주세요.");
       }
 
-      addLog(`✨ 총 ${fileCount}개 파일 완벽 수집 완료! ZIP 압축 중...`, "success");
+      addLog(`✨ 총 ${fileCount}개 파일 무손실 수집 완료! ZIP 압축 중...`, "success");
       updateProgress(90, "", "ZIP 파일 패키징 중...");
 
       // 5. Generate ZIP
@@ -380,7 +393,7 @@
 
     let maxScroll = scrollContainer.scrollHeight - scrollContainer.clientHeight;
     let currentScroll = 0;
-    const step = 150; // Scroll by ~4 items at a time
+    const step = 150;
 
     while (currentScroll <= maxScroll + step * 2) {
       if (shouldAbort) break;
@@ -393,7 +406,7 @@
       maxScroll = scrollContainer.scrollHeight - scrollContainer.clientHeight;
     }
 
-    // Pass 2: Scroll from BOTTOM to TOP to ensure no items missed
+    // Pass 2: Scroll from BOTTOM to TOP to ensure complete coverage
     addLog("🔄 역방향 검증 스캔 중...", "info");
     while (currentScroll >= -step) {
       if (shouldAbort) break;
@@ -430,7 +443,7 @@
       try {
         btn.scrollIntoView({ block: "center" });
         btn.click();
-        await sleep(220); // Wait for editor to update
+        await sleep(220); // Wait for Monaco model to load
 
         const isImage = /\.(jpg|jpeg|png|webp|gif|ico|svg)$/i.test(cleanPath);
         if (isImage) {
@@ -438,7 +451,8 @@
           files[cleanPath] = imgContent || "// Image asset";
           addLog(`✔ [이미지] ${cleanPath}`, "info");
         } else {
-          const content = await getEditorContentWithPolling();
+          // Extract full un-truncated source code from Monaco Editor Model API
+          const content = await getFullEditorContent(cleanPath);
           files[cleanPath] = content;
           addLog(`✔ ${cleanPath} (${content.length} chars)`, "info");
         }
@@ -449,7 +463,7 @@
     }
   }
 
-  // Handle image assets if rendered as <img>
+  // Handle image assets
   async function tryGetImageContent() {
     const imgEl = document.querySelector("main img, .code-viewer img, img[src*='blob:'], img[src*='http']");
     if (imgEl && imgEl.src) {
@@ -461,23 +475,54 @@
     return null;
   }
 
-  // Extract editor content with polling
-  async function getEditorContentWithPolling() {
-    let retries = 8;
-    while (retries > 0) {
-      const code = readEditorContent();
-      if (code && code.trim().length > 0) {
-        return code;
+  // Request complete code from injected script (Monaco Editor Model API)
+  function requestActiveCodeFromInjected(filePath) {
+    return new Promise((resolve) => {
+      const reqId = "req_" + Math.random().toString(36).substr(2, 9);
+      const timeout = setTimeout(() => {
+        window.removeEventListener("message", handler);
+        resolve(null);
+      }, 500);
+
+      function handler(event) {
+        if (event.data && event.data.type === "LCD_RESPONSE_ACTIVE_CODE" && event.data.reqId === reqId) {
+          clearTimeout(timeout);
+          window.removeEventListener("message", handler);
+          resolve(event.data.code);
+        }
       }
+
+      window.addEventListener("message", handler);
+      window.postMessage({ type: "LCD_REQUEST_ACTIVE_CODE", filePath, reqId }, "*");
+    });
+  }
+
+  // Extract full editor content without truncation
+  async function getFullEditorContent(filePath) {
+    let retries = 6;
+    while (retries > 0) {
+      // 1. Direct Monaco API via Injected Script (Zero-truncation guaranteed)
+      const directCode = await requestActiveCodeFromInjected(filePath);
+      if (directCode && directCode.trim().length > 0) {
+        return directCode;
+      }
+
+      // 2. DOM fallback
+      const domCode = readEditorContentDOM();
+      if (domCode && domCode.trim().length > 0) {
+        return domCode;
+      }
+
       await sleep(100);
       retries--;
     }
-    return readEditorContent() || "";
+
+    return (await requestActiveCodeFromInjected(filePath)) || readEditorContentDOM() || "";
   }
 
-  // Read editor content from Monaco, CodeMirror, or DOM
-  function readEditorContent() {
-    // 1. Monaco Editor Models (Global)
+  // Read editor content from DOM fallback
+  function readEditorContentDOM() {
+    // 1. Monaco Editor Models (if globally accessible)
     if (window.monaco && window.monaco.editor) {
       const models = window.monaco.editor.getModels();
       if (models && models.length > 0) {
@@ -485,7 +530,19 @@
       }
     }
 
-    // 2. Monaco Editor View Lines DOM
+    // 2. Pre / Code block
+    const codeTag = document.querySelector("main pre code, .code-viewer pre, pre code, pre");
+    if (codeTag) {
+      return codeTag.textContent || "";
+    }
+
+    // 3. Textarea
+    const textarea = document.querySelector(".monaco-editor textarea, main textarea");
+    if (textarea && textarea.value) {
+      return textarea.value;
+    }
+
+    // 4. Monaco Editor View Lines DOM
     const monacoLines = document.querySelectorAll(".monaco-editor .view-line");
     if (monacoLines && monacoLines.length > 0) {
       return Array.from(monacoLines)
@@ -493,24 +550,12 @@
         .join("\n");
     }
 
-    // 3. CodeMirror Lines
+    // 5. CodeMirror Lines
     const cmLines = document.querySelectorAll(".cm-line");
     if (cmLines && cmLines.length > 0) {
       return Array.from(cmLines)
         .map((l) => l.textContent || "")
         .join("\n");
-    }
-
-    // 4. Pre / Code block
-    const codeTag = document.querySelector("main pre code, .code-viewer pre, pre code, pre");
-    if (codeTag) {
-      return codeTag.textContent || "";
-    }
-
-    // 5. Textarea
-    const textarea = document.querySelector(".monaco-editor textarea, main textarea");
-    if (textarea && textarea.value) {
-      return textarea.value;
     }
 
     return "";

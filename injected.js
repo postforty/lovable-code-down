@@ -8,7 +8,10 @@
 
   // Listen for extraction requests from content script
   window.addEventListener("message", async (event) => {
-    if (event.data && event.data.type === "LCD_REQUEST_STATE_EXTRACTION") {
+    if (!event.data) return;
+
+    // 1. Bulk state extraction request
+    if (event.data.type === "LCD_REQUEST_STATE_EXTRACTION") {
       const files = await extractFilesFromPageState();
       window.postMessage(
         {
@@ -18,7 +21,85 @@
         "*"
       );
     }
+
+    // 2. Active file full code extraction request (Monaco Editor direct getValue())
+    if (event.data.type === "LCD_REQUEST_ACTIVE_CODE") {
+      const code = getFullMonacoCode(event.data.filePath);
+      window.postMessage(
+        {
+          type: "LCD_RESPONSE_ACTIVE_CODE",
+          reqId: event.data.reqId,
+          code: code,
+        },
+        "*"
+      );
+    }
   });
+
+  // Extract complete un-truncated code from Monaco Editor API
+  function getFullMonacoCode(targetPath) {
+    try {
+      // 1. Try window.monaco editor models
+      if (window.monaco && window.monaco.editor) {
+        if (window.monaco.editor.getModels) {
+          const models = window.monaco.editor.getModels();
+          if (models && models.length > 0) {
+            // Find model by path match
+            if (targetPath) {
+              const matchedModel = models.find((m) => {
+                const p = m.uri ? m.uri.path || m.uri.fsPath || "" : "";
+                return p.endsWith(targetPath) || targetPath.endsWith(p.replace(/^\//, ""));
+              });
+              if (matchedModel) {
+                return matchedModel.getValue();
+              }
+            }
+            // Fallback: active or latest model
+            const lastModel = models[models.length - 1];
+            if (lastModel && lastModel.getValue) {
+              return lastModel.getValue();
+            }
+          }
+        }
+
+        // 2. Try window.monaco active editors
+        if (window.monaco.editor.getEditors) {
+          const editors = window.monaco.editor.getEditors();
+          if (editors && editors.length > 0) {
+            for (const ed of editors) {
+              const model = ed.getModel && ed.getModel();
+              if (model && model.getValue) {
+                return model.getValue();
+              }
+            }
+          }
+        }
+      }
+
+      // 3. Try finding Monaco editor instance via React Fiber on .monaco-editor element
+      const monacoEl = document.querySelector(".monaco-editor");
+      if (monacoEl) {
+        const fiberKey = Object.keys(monacoEl).find((k) => k.startsWith("__reactFiber$"));
+        if (fiberKey) {
+          let fiber = monacoEl[fiberKey];
+          for (let i = 0; i < 15 && fiber; i++) {
+            const props = fiber.memoizedProps;
+            if (props && props.editor && props.editor.getValue) {
+              return props.editor.getValue();
+            }
+            if (props && props.value && typeof props.value === "string") {
+              return props.value;
+            }
+            fiber = fiber.return;
+          }
+        }
+      }
+    } catch (e) {
+      console.warn("[LCD] getFullMonacoCode error:", e);
+    }
+
+    return null;
+  }
 
   async function extractFilesFromPageState() {
     const files = {};
@@ -88,7 +169,6 @@
     for (const obj of candidates) {
       if (!obj || typeof obj !== "object") continue;
 
-      // Check if this object is a files map: e.g. { "src/App.tsx": "..." } or { "package.json": { content: "..." } }
       const filesMap = checkObjectForFiles(obj);
       if (filesMap && Object.keys(filesMap).length >= 3) {
         return filesMap;
@@ -122,7 +202,6 @@
   function checkObjectForFiles(obj) {
     if (!obj || typeof obj !== "object") return null;
 
-    // Direct map of path -> string content
     const keys = Object.keys(obj);
     const codeExts = /\.(tsx|ts|js|jsx|json|css|html|md|toml|lock|gitignore)$/i;
     const fileKeys = keys.filter((k) => codeExts.test(k) || k.includes("/"));
@@ -146,7 +225,6 @@
       if (validCount >= 3) return result;
     }
 
-    // Check nested properties like obj.files, obj.fileTree, obj.project.files
     const nestedProps = ["files", "projectFiles", "fileTree", "fileMap", "sources", "documents"];
     for (const prop of nestedProps) {
       if (obj[prop] && typeof obj[prop] === "object") {
