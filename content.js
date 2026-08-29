@@ -1,5 +1,5 @@
 /**
- * Lovable Code Downloader - Content Script
+ * Lovable Code Downloader - Content Script (v1.0.1)
  * Extracts full project code from Lovable.dev and downloads it as a ZIP file.
  */
 
@@ -7,21 +7,33 @@
   if (window.__LOVABLE_CODE_DOWNLOADER_INJECTED__) return;
   window.__LOVABLE_CODE_DOWNLOADER_INJECTED__ = true;
 
-  console.log("⚡ Lovable Code Downloader extension active.");
+  console.log("⚡ Lovable Code Downloader active.");
 
   let isExtracting = false;
   let shouldAbort = false;
 
-  // Utility sleep
   const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
-  // Initialize UI when DOM is ready
+  // Initialize UI & Injected Script
   function init() {
+    injectMainWorldScript();
     createFloatingButton();
     createProgressModal();
   }
 
-  // Detect project name from page header or URL
+  // Inject injected.js into the main page execution context
+  function injectMainWorldScript() {
+    try {
+      const script = document.createElement("script");
+      script.src = chrome.runtime.getURL("injected.js");
+      (document.head || document.documentElement).appendChild(script);
+      script.onload = () => script.remove();
+    } catch (e) {
+      console.warn("[LCD] Could not inject main world script:", e);
+    }
+  }
+
+  // Extract project name from header or URL
   function getProjectName() {
     const titleEl =
       document.querySelector("header h1, header h2") ||
@@ -43,7 +55,7 @@
     return "lovable_project";
   }
 
-  // Create Floating Action Button (FAB)
+  // Floating Action Button (FAB)
   function createFloatingButton() {
     if (document.getElementById("lcd-floating-btn")) return;
 
@@ -58,12 +70,12 @@
       <span>코드 전체 다운로드 (ZIP)</span>
     `;
 
-    btn.title = "Lovable 프로젝트의 모든 폴더와 소스코드를 ZIP으로 다운로드합니다.";
+    btn.title = "Lovable 프로젝트 소스코드 전체를 ZIP으로 다운로드합니다.";
     btn.addEventListener("click", startExtractionFlow);
     document.body.appendChild(btn);
   }
 
-  // Create Progress & Log Modal
+  // Progress Modal
   function createProgressModal() {
     if (document.getElementById("lcd-modal-overlay")) return;
 
@@ -88,7 +100,7 @@
           </button>
         </div>
         <div class="lcd-modal-body">
-          <p id="lcd-modal-desc">파일 트리의 모든 폴더를 자동으로 열고 소스 코드를 수집하여 ZIP으로 압축합니다.</p>
+          <p id="lcd-modal-desc">모든 폴더와 파일을 탐색하여 소스 코드를 ZIP으로 패키징합니다.</p>
           <div class="lcd-progress-container">
             <div class="lcd-progress-bar-bg">
               <div class="lcd-progress-bar-fill" id="lcd-progress-fill"></div>
@@ -178,13 +190,13 @@
   }
 
   // ----------------------------------------------------
-  // Extraction Workflow
+  // Main Extraction Flow
   // ----------------------------------------------------
 
   async function startExtractionFlow() {
     if (isExtracting) return;
     if (typeof JSZip === "undefined") {
-      alert("JSZip 라이브러리가 로드되지 않았습니다. 페이지를 새로고침(F5)한 후 다시 시도해 주세요.");
+      alert("JSZip 라이브러리가 준비되지 않았습니다. 페이지를 새로고침(F5)한 후 다시 시도해 주세요.");
       return;
     }
 
@@ -199,34 +211,38 @@
     if (logBox) logBox.innerHTML = "";
 
     updateProgress(0, "", "준비 중...");
-    addLog("Lovable 코드 일괄 수집 작업 시작", "info");
+    addLog("Lovable 코드 수집 프로세스 시작", "info");
 
     try {
-      // 1. Ensure Code View Tab is Active
+      // Step 1: Ensure Code View Tab is active
       await ensureCodeViewActive();
 
-      // 2. Expand All Tree Folders Completely
-      addLog("📁 파일 트리의 모든 폴더를 자동으로 여는 중...", "info");
-      await expandAllFoldersCompletely();
+      // Step 2: Try Fast In-Memory Extraction via injected script
+      addLog("메모리 상태 고속 추출(Fast Mode) 시도 중...", "info");
+      let collectedFiles = await requestStateFromInjected();
 
-      // 3. Scan Tree and Collect All Files
-      addLog("🔍 전체 파일 목록 분석 중...", "info");
-      const collectedFiles = await collectAllFilesFromTree();
+      if (collectedFiles && Object.keys(collectedFiles).length > 0) {
+        addLog(`⚡ 고속 추출 성공! ${Object.keys(collectedFiles).length}개 파일 확보`, "success");
+      } else {
+        // Step 3: DOM-based Crawler
+        addLog("DOM 파일 트리 크롤링 모드로 전환합니다...", "info");
+        collectedFiles = await runRobustDomCrawler();
+      }
 
       if (shouldAbort) {
-        addLog("수집 작업이 중단되었습니다.", "warning");
+        addLog("작업이 사용자에 의해 중단되었습니다.", "warning");
         return;
       }
 
       const fileCount = Object.keys(collectedFiles).length;
       if (fileCount === 0) {
-        throw new Error("수집된 파일이 없습니다. 화면에 코드 패널과 파일 트리가 열려 있는지 확인해 주세요.");
+        throw new Error("수집된 파일이 없습니다. 화면에 파일 목록이 보이는지 확인해 주세요.");
       }
 
-      addLog(`✨ 총 ${fileCount}개 파일 수집 완료! ZIP 압축 파일 생성 중...`, "success");
-      updateProgress(90, "", "ZIP 압축 패키징 중...");
+      addLog(`✨ 총 ${fileCount}개 파일 수집 완료! ZIP 압축 중...`, "success");
+      updateProgress(90, "", "ZIP 압축 생성 중...");
 
-      // 4. Bundle into ZIP
+      // Step 4: Generate ZIP with JSZip
       const zip = new JSZip();
       for (const [path, content] of Object.entries(collectedFiles)) {
         zip.file(path, content);
@@ -239,7 +255,7 @@
         compressionOptions: { level: 6 },
       });
 
-      // 5. Trigger Browser Download
+      // Step 5: Trigger Browser Download
       const fileName = `${projectName}.zip`;
       const downloadUrl = URL.createObjectURL(zipBlob);
       const a = document.createElement("a");
@@ -254,8 +270,8 @@
       }, 3000);
 
       updateProgress(100, fileName, "다운로드 완료!");
-      addLog(`🎉 성공: '${fileName}' 다운로드가 완료되었습니다!`, "success");
-      showToast(`🎉 '${fileName}' 다운로드가 시작되었습니다!`);
+      addLog(`🎉 성공: '${fileName}' 다운로드가 시작되었습니다.`, "success");
+      showToast(`🎉 '${fileName}' 다운로드가 완료되었습니다!`);
     } catch (err) {
       console.error("[Lovable Code Downloader]", err);
       addLog(`❌ 오류: ${err.message}`, "warning");
@@ -288,274 +304,254 @@
     }
   }
 
-  // Find the file tree container (left sidebar of code view)
-  function getTreeContainer() {
-    // 1. Check by Search code input
-    const searchInput = document.querySelector('input[placeholder*="Search"], input[placeholder*="검색"]');
-    if (searchInput) {
-      let parent = searchInput.parentElement;
-      while (parent && parent !== document.body) {
-        if (parent.querySelectorAll("div, button").length > 15) {
-          return parent;
-        }
-        parent = parent.parentElement;
-      }
-    }
+  // Request state from injected main-world script
+  function requestStateFromInjected() {
+    return new Promise((resolve) => {
+      const timeout = setTimeout(() => {
+        window.removeEventListener("message", handler);
+        resolve(null);
+      }, 800);
 
-    // 2. Check by common known files (.gitignore, package.json, etc.)
-    const fileEl = Array.from(document.querySelectorAll("*")).find(
-      (el) => el.childNodes.length === 1 && (el.textContent.trim() === ".gitignore" || el.textContent.trim() === "package.json")
-    );
-    if (fileEl) {
-      let parent = fileEl.parentElement;
-      for (let i = 0; i < 6; i++) {
-        if (parent && parent.querySelectorAll("*").length > 20) {
-          return parent;
-        }
-        if (parent) parent = parent.parentElement;
-      }
-    }
-
-    return document.body;
-  }
-
-  // Completely expand all folders in tree until no more collapsed folders exist
-  async function expandAllFoldersCompletely() {
-    let loop = 0;
-    const maxLoops = 15;
-
-    while (loop < maxLoops) {
-      if (shouldAbort) break;
-      loop++;
-
-      const container = getTreeContainer();
-      // Find all clickable row elements in tree
-      const allRows = Array.from(container.querySelectorAll("div, button, [role='treeitem']"));
-      let openedAny = false;
-
-      for (const row of allRows) {
-        if (shouldAbort) break;
-        // Ignore container itself or massive containers
-        if (row.clientHeight === 0 || row.childNodes.length > 10) continue;
-
-        const text = row.textContent.trim();
-        if (!text || text.includes("\n") || text.length > 50) continue;
-
-        // Determine if this row is a folder
-        const isFile = isLikelyFileName(text);
-        if (isFile) continue;
-
-        // Check if folder is collapsed (contains right-arrow / chevron-right / '>' or aria-expanded=false)
-        const hasChevronRight =
-          row.querySelector("svg.lucide-chevron-right, svg[data-lucide='chevron-right'], svg") ||
-          row.innerHTML.includes("chevron-right") ||
-          row.textContent.startsWith(">");
-
-        const isCollapsed =
-          row.getAttribute("aria-expanded") === "false" ||
-          row.getAttribute("data-state") === "closed" ||
-          hasChevronRight;
-
-        const isExpanded =
-          row.getAttribute("aria-expanded") === "true" ||
-          row.getAttribute("data-state") === "open" ||
-          row.innerHTML.includes("chevron-down");
-
-        if (!isExpanded && isCollapsed) {
-          // Trigger click to expand folder
-          row.dispatchEvent(new MouseEvent("click", { bubbles: true, cancelable: true }));
-          openedAny = true;
-          await sleep(100);
+      function handler(event) {
+        if (event.data && event.data.type === "LCD_RESPONSE_STATE_EXTRACTION") {
+          clearTimeout(timeout);
+          window.removeEventListener("message", handler);
+          resolve(event.data.files);
         }
       }
 
-      if (!openedAny) {
-        break; // All folders are fully open!
-      }
-      await sleep(150);
-    }
+      window.addEventListener("message", handler);
+      window.postMessage({ type: "LCD_REQUEST_STATE_EXTRACTION" }, "*");
+    });
   }
 
-  // Check if a name is a file
-  function isLikelyFileName(name) {
-    const trimmed = name.replace(/^>\s*/, "").trim();
-    if (/\.(tsx|ts|js|jsx|json|css|html|md|ico|txt|lock|toml|ya?ml|svg|png|jpg|webp|env|gitignore|prettierignore|prettierrc|eslintrc.*)$/i.test(trimmed)) {
-      return true;
-    }
-    const specialFiles = ["Dockerfile", "Makefile", "LICENSE", "AGENTS.md", "README.md", "bun.lock", "bunfig.toml", "components.json"];
-    return specialFiles.includes(trimmed);
-  }
+  // ----------------------------------------------------
+  // Robust DOM-based Tree Crawler
+  // ----------------------------------------------------
 
-  // Helper to extract clean name without icon prefixes
-  function cleanItemName(rawText) {
-    return rawText
-      .replace(/^[>›▼▶{}]+\s*/, "")
-      .replace(/[{}\s]+$/, "")
-      .trim();
-  }
-
-  // Collect all files by traversing the open tree and reading each file
-  async function collectAllFilesFromTree() {
-    const container = getTreeContainer();
-    const treeItems = parseTreeHierarchy(container);
-
-    addLog(`총 ${treeItems.length}개 파일 항목 식별됨. 파일 내용 수집 시작...`, "info");
-
+  async function runRobustDomCrawler() {
     const files = {};
-    const total = treeItems.length;
 
+    // 1. Expand all folder chevrons
+    addLog("📁 파일 트리의 모든 폴더를 펼치는 중...", "info");
+    await expandAllFolderRows();
+
+    // 2. Discover all file nodes
+    const fileNodes = discoverAllFileElements();
+    addLog(`🔍 총 ${fileNodes.length}개의 소스코드 파일 항목 발견됨`, "info");
+
+    if (fileNodes.length === 0) {
+      // Fallback: try reading all leaf nodes that look like files
+      const fallbackNodes = findFallbackFileNodes();
+      addLog(`🔍 대체 스캐너로 ${fallbackNodes.length}개 항목 재발견`, "info");
+      fileNodes.push(...fallbackNodes);
+    }
+
+    if (fileNodes.length === 0) {
+      return files;
+    }
+
+    const total = fileNodes.length;
+
+    // 3. Click each file and read editor content
     for (let i = 0; i < total; i++) {
       if (shouldAbort) break;
 
-      const item = treeItems[i];
-      updateProgress(((i + 1) / total) * 85, item.fullPath, `파일 수집 중 (${i + 1}/${total})`);
+      const fileItem = fileNodes[i];
+      updateProgress(((i + 1) / total) * 85, fileItem.fullPath, `파일 수집 중 (${i + 1}/${total})`);
 
       try {
-        // Scroll and click the file item in the tree
-        item.element.scrollIntoView({ block: "nearest" });
-        item.element.dispatchEvent(new MouseEvent("click", { bubbles: true, cancelable: true }));
+        fileItem.element.scrollIntoView({ block: "nearest", inline: "nearest" });
+        fileItem.element.dispatchEvent(new MouseEvent("click", { bubbles: true, cancelable: true }));
 
-        // Wait for Code Editor to load this file
-        await sleep(280);
+        // Allow editor to load the selected file
+        await sleep(250);
 
-        const content = await waitForEditorContent(item.name);
-        files[item.fullPath] = content;
-        addLog(`✔ ${item.fullPath} (${content.length} chars)`, "info");
+        const content = await getEditorContentWithPolling();
+        files[fileItem.fullPath] = content;
+        addLog(`✔ ${fileItem.fullPath} (${content.length} chars)`, "info");
       } catch (err) {
-        addLog(`⚠ ${item.fullPath} 수집 실패: ${err.message}`, "warning");
-        files[item.fullPath] = `// Error loading file: ${err.message}`;
+        addLog(`⚠ ${fileItem.fullPath} 수집 경고: ${err.message}`, "warning");
+        files[fileItem.fullPath] = `// Error reading file: ${err.message}`;
       }
     }
 
     return files;
   }
 
-  // Parse indentation and hierarchy from file tree rows
-  function parseTreeHierarchy(container) {
-    const rows = Array.from(container.querySelectorAll("div, button, [role='treeitem']"))
-      .filter((el) => {
-        if (el.clientHeight === 0) return false;
-        const text = el.textContent.trim();
-        if (!text || text.includes("\n") || text.length > 60) return false;
-        if (text === "Search code" || text === "Code") return false;
-        return el.childNodes.length <= 6;
-      });
+  // Expand all collapsed folders in tree
+  async function expandAllFolderRows() {
+    for (let pass = 0; pass < 8; pass++) {
+      if (shouldAbort) break;
 
-    // Deduplicate distinct visual rows
-    const uniqueRows = [];
-    const seenElements = new Set();
+      // Look for SVGs or elements with chevron-right, arrow, or collapsed state
+      const candidates = Array.from(
+        document.querySelectorAll("svg, button, div.cursor-pointer, [role='treeitem']")
+      );
 
-    for (const row of rows) {
-      if (seenElements.has(row)) continue;
-      // Filter out parents if child represents the row text
-      const text = cleanItemName(row.textContent);
-      if (!text) continue;
+      let opened = false;
+      for (const el of candidates) {
+        // Check if element or its children contains chevron-right or >
+        const isCollapsedSvg =
+          el.tagName === "svg" &&
+          (el.innerHTML.includes("polyline") || el.classList.contains("lucide-chevron-right"));
 
-      uniqueRows.push({
-        element: row,
-        text: text,
-        rawText: row.textContent.trim(),
-        indent: getElementIndentation(row),
-      });
-      seenElements.add(row);
-    }
+        const isCollapsedRow =
+          el.getAttribute("aria-expanded") === "false" ||
+          el.getAttribute("data-state") === "closed" ||
+          (el.textContent && el.textContent.trim().startsWith(">"));
 
-    // Build hierarchy stack based on indent levels
-    const fileItems = [];
-    const folderStack = []; // [{ indent, name }]
-
-    for (const row of uniqueRows) {
-      const isFile = isLikelyFileName(row.text);
-
-      // Pop folders from stack that have >= current indent
-      while (folderStack.length > 0 && folderStack[folderStack.length - 1].indent >= row.indent) {
-        folderStack.pop();
+        if (isCollapsedSvg || isCollapsedRow) {
+          const clickable = el.closest("button") || el.closest("div.cursor-pointer") || el;
+          clickable.dispatchEvent(new MouseEvent("click", { bubbles: true, cancelable: true }));
+          opened = true;
+          await sleep(60);
+        }
       }
 
-      if (!isFile) {
-        // This is a directory
-        folderStack.push({ indent: row.indent, name: row.text });
-      } else {
-        // This is a file
-        const dirPath = folderStack.map((f) => f.name).join("/");
-        const fullPath = dirPath ? `${dirPath}/${row.text}` : row.text;
+      if (!opened) break;
+      await sleep(150);
+    }
+  }
 
-        // Check if we already registered this fullPath
-        if (!fileItems.some((f) => f.fullPath === fullPath)) {
-          fileItems.push({
-            name: row.text,
+  // Discover all file items in DOM
+  function discoverAllFileElements() {
+    const fileRegex = /\.(tsx|ts|js|jsx|json|css|html|md|ico|txt|lock|toml|ya?ml|svg|png|jpg|webp|env|gitignore|prettierignore|prettierrc|eslintrc.*)$/i;
+    const specialNames = ["Dockerfile", "Makefile", "LICENSE", "AGENTS.md", "bun.lock", "bunfig.toml", "components.json", "package.json", "README.md", "tsconfig.json", "vite.config.ts"];
+
+    // Find all leaf text elements in page
+    const allElements = Array.from(document.querySelectorAll("*"));
+    const matched = [];
+    const seenPaths = new Set();
+
+    for (const el of allElements) {
+      if (el.children.length > 2) continue; // leaf or near-leaf only
+      const text = el.textContent.trim();
+      if (!text || text.includes("\n") || text.length > 50) continue;
+
+      const isFile = fileRegex.test(text) || specialNames.includes(text);
+      if (isFile) {
+        const fullPath = buildFilePathFromDOM(el, text);
+        if (!seenPaths.has(fullPath)) {
+          seenPaths.add(fullPath);
+          matched.push({
+            name: text,
             fullPath: fullPath,
-            element: row.element,
+            element: el.closest("button") || el.closest("div.cursor-pointer") || el,
           });
         }
       }
     }
 
-    return fileItems;
+    return matched;
   }
 
-  // Calculate indentation pixel or depth of tree row
-  function getElementIndentation(el) {
-    let paddingLeft = 0;
-    let current = el;
-    while (current && current !== document.body) {
-      const style = window.getComputedStyle(current);
-      const pl = parseFloat(style.paddingLeft) || 0;
-      const ml = parseFloat(style.marginLeft) || 0;
-      paddingLeft += pl + ml;
+  // Fallback scanner for file items
+  function findFallbackFileNodes() {
+    const knownFiles = [
+      "project.json", "favicon.ico", "robots.txt", "router.tsx", "routeTree.gen.ts",
+      "server.ts", "start.ts", "styles.css", ".gitignore", ".prettierignore",
+      ".prettierrc", "AGENTS.md", "bun.lock", "bunfig.toml", "components.json",
+      "eslint.config.js", "package.json", "README.md", "tsconfig.json", "vite.config.ts"
+    ];
+
+    const results = [];
+    const seen = new Set();
+
+    for (const filename of knownFiles) {
+      const el = Array.from(document.querySelectorAll("*")).find(
+        (e) => e.children.length <= 1 && e.textContent.trim() === filename
+      );
+      if (el) {
+        const fullPath = buildFilePathFromDOM(el, filename);
+        if (!seen.has(fullPath)) {
+          seen.add(fullPath);
+          results.push({
+            name: filename,
+            fullPath: fullPath,
+            element: el,
+          });
+        }
+      }
+    }
+
+    return results;
+  }
+
+  // Build clean relative file path by checking ancestor folders
+  function buildFilePathFromDOM(el, fileName) {
+    const pathParts = [];
+    let current = el.parentElement;
+
+    while (current && current !== document.body && pathParts.length < 5) {
+      // Look for parent folder headers
+      const folderHeader = current.querySelector(":scope > button, :scope > div.font-medium, :scope > span");
+      if (folderHeader && folderHeader !== el) {
+        const fText = folderHeader.textContent.trim().replace(/^>\s*/, "");
+        if (fText && !fText.includes("\n") && !fText.includes(".") && fText.length < 25) {
+          if (!pathParts.includes(fText)) {
+            pathParts.unshift(fText);
+          }
+        }
+      }
       current = current.parentElement;
     }
-    return Math.round(paddingLeft);
+
+    // Default prefix heuristics if not captured by DOM tree
+    if (pathParts.length === 0) {
+      if (["favicon.ico", "robots.txt"].includes(fileName)) {
+        return `public/${fileName}`;
+      }
+      if (["router.tsx", "routeTree.gen.ts", "server.ts", "start.ts", "styles.css"].includes(fileName)) {
+        return `src/${fileName}`;
+      }
+      if (["project.json"].includes(fileName)) {
+        return `.lovable/${fileName}`;
+      }
+    }
+
+    return pathParts.length > 0 ? `${pathParts.join("/")}/${fileName}` : fileName;
   }
 
-  // Wait and extract code content from Editor
-  async function waitForEditorContent(fileName) {
-    let maxTries = 8;
-    while (maxTries > 0) {
-      const content = readEditorDOM();
-      if (content && content.trim().length > 0) {
-        return content;
+  // Extract editor content with polling
+  async function getEditorContentWithPolling() {
+    let retries = 6;
+    while (retries > 0) {
+      const code = readEditorContent();
+      if (code && code.trim().length > 0) {
+        return code;
       }
       await sleep(100);
-      maxTries--;
+      retries--;
     }
-    return readEditorDOM() || "";
+    return readEditorContent() || "";
   }
 
-  // Read editor content from Monaco, CodeMirror, pre, or textarea
-  function readEditorDOM() {
-    // 1. Monaco Editor Model API
-    if (window.monaco && window.monaco.editor) {
-      const models = window.monaco.editor.getModels();
-      if (models && models.length > 0) {
-        const activeModel = models[models.length - 1];
-        return activeModel.getValue();
-      }
-    }
-
-    // 2. Monaco Editor View Lines DOM
+  // Read editor content from Monaco, CodeMirror, or DOM
+  function readEditorContent() {
+    // 1. Monaco Editor Lines
     const monacoLines = document.querySelectorAll(".monaco-editor .view-line");
     if (monacoLines && monacoLines.length > 0) {
       return Array.from(monacoLines)
-        .map((line) => line.textContent || "")
+        .map((l) => l.textContent || "")
         .join("\n");
     }
 
-    // 3. CodeMirror Lines
+    // 2. CodeMirror
     const cmLines = document.querySelectorAll(".cm-line");
     if (cmLines && cmLines.length > 0) {
       return Array.from(cmLines)
-        .map((line) => line.textContent || "")
+        .map((l) => l.textContent || "")
         .join("\n");
     }
 
-    // 4. Pre / Code block
+    // 3. Pre / Code block
     const codeTag = document.querySelector("main pre code, .code-viewer pre, pre code, pre");
     if (codeTag) {
       return codeTag.textContent || "";
     }
 
-    // 5. Textarea
+    // 4. Textarea
     const textarea = document.querySelector(".monaco-editor textarea, main textarea");
     if (textarea && textarea.value) {
       return textarea.value;
