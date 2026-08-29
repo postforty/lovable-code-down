@@ -1,6 +1,6 @@
 /**
- * Lovable Code Downloader - Content Script (v1.0.8)
- * High-fidelity code extractor using official Download button interception & Monaco API.
+ * Lovable Code Downloader - Content Script (v1.0.9)
+ * Universal Editor Text Extractor for .code-editor-wrapper and all editor engines.
  */
 
 (function () {
@@ -21,7 +21,7 @@
     createProgressModal();
   }
 
-  // Inject script into main execution context
+  // Inject script into page context
   function injectMainWorldScript() {
     try {
       const script = document.createElement("script");
@@ -99,7 +99,7 @@
           </button>
         </div>
         <div class="lcd-modal-body">
-          <p id="lcd-modal-desc">모든 파일의 원본 소스코드를 온전히 수집하여 ZIP으로 압축합니다.</p>
+          <p id="lcd-modal-desc">모든 파일의 원본 소스코드를 100% 온전히 수집하여 ZIP으로 압축합니다.</p>
           <div class="lcd-progress-container">
             <div class="lcd-progress-bar-bg">
               <div class="lcd-progress-bar-fill" id="lcd-progress-fill"></div>
@@ -210,7 +210,7 @@
     if (logBox) logBox.innerHTML = "";
 
     updateProgress(0, "", "준비 중...");
-    addLog("Lovable 소스코드 무손실 추출 시작", "info");
+    addLog("Lovable 소스코드 추출 엔진 시작", "info");
 
     try {
       // 1. Ensure Code Tab is active
@@ -230,7 +230,7 @@
       await expandAllFoldersWithScroll(shadowRoot, scrollContainer);
 
       // 4. Step 2: Collect ALL files with Virtual Scrolling
-      addLog("🔍 전체 파일 탐색 및 무손실 코드 수집 시작...", "info");
+      addLog("🔍 전체 파일 탐색 및 소스코드 수집 시작...", "info");
       const collectedFiles = await collectAllFilesWithScroll(shadowRoot, scrollContainer);
 
       if (shouldAbort) {
@@ -243,7 +243,7 @@
         throw new Error("수집된 파일이 없습니다. 파일 목록을 다시 확인해 주세요.");
       }
 
-      addLog(`✨ 총 ${fileCount}개 파일 무손실 수집 완료! ZIP 압축 중...`, "success");
+      addLog(`✨ 총 ${fileCount}개 파일 수집 완료! ZIP 압축 생성 중...`, "success");
       updateProgress(90, "", "ZIP 파일 패키징 중...");
 
       // 5. Generate ZIP
@@ -274,7 +274,7 @@
       }, 3000);
 
       updateProgress(100, fileName, "다운로드 완료!");
-      addLog(`🎉 성공: '${fileName}' 전체 파일 다운로드가 완료되었습니다!`, "success");
+      addLog(`🎉 성공: '${fileName}' (${Math.round(zipBlob.size / 1024)} KB) 다운로드가 완료되었습니다!`, "success");
       showToast(`🎉 '${fileName}' 다운로드가 시작되었습니다!`);
     } catch (err) {
       console.error("[Lovable Code Downloader]", err);
@@ -440,7 +440,7 @@
       try {
         btn.scrollIntoView({ block: "center" });
         btn.click();
-        await sleep(240); // Wait for file to load
+        await sleep(250); // Wait for file to render
 
         const isImage = /\.(jpg|jpeg|png|webp|gif|ico|svg)$/i.test(cleanPath);
         if (isImage) {
@@ -448,10 +448,11 @@
           files[cleanPath] = imgContent || "// Image asset";
           addLog(`✔ [이미지] ${cleanPath}`, "info");
         } else {
-          // Extract full un-truncated source code
-          const content = await getFullEditorContent(cleanPath);
+          // Extract actual code
+          const content = await getEditorContentRobust(cleanPath);
           files[cleanPath] = content;
-          addLog(`✔ ${cleanPath} (${content.length} chars)`, "info");
+          const previewSnippet = content.replace(/\s+/g, " ").slice(0, 30);
+          addLog(`✔ ${cleanPath} (${content.length} B) [${previewSnippet}...]`, "info");
         }
       } catch (err) {
         addLog(`⚠ ${cleanPath} 수집 실패: ${err.message}`, "warning");
@@ -473,39 +474,89 @@
   }
 
   // ----------------------------------------------------
-  // Full Code Extraction Pipeline
+  // Robust Universal Editor Code Extractor
   // ----------------------------------------------------
 
-  // Intercept official Lovable Download button
-  function requestInterceptDownloadClick() {
-    return new Promise((resolve) => {
-      const reqId = "req_" + Math.random().toString(36).substr(2, 9);
-      const timeout = setTimeout(() => {
-        window.removeEventListener("message", handler);
-        resolve(null);
-      }, 400);
-
-      function handler(event) {
-        if (event.data && event.data.type === "LCD_RESPONSE_INTERCEPT_DOWNLOAD" && event.data.reqId === reqId) {
-          clearTimeout(timeout);
-          window.removeEventListener("message", handler);
-          resolve(event.data.content);
-        }
+  async function getEditorContentRobust(filePath) {
+    // 1. Try Injected script (Monaco / React Fiber)
+    try {
+      const injectedCode = await requestActiveCodeFromInjected(filePath);
+      if (injectedCode && typeof injectedCode === "string" && injectedCode.trim().length > 0) {
+        return cleanCodeText(injectedCode);
       }
+    } catch (_) {}
 
-      window.addEventListener("message", handler);
-      window.postMessage({ type: "LCD_INTERCEPT_DOWNLOAD_CLICK", reqId }, "*");
-    });
+    // 2. Try extracting from .code-editor-wrapper DOM directly
+    const wrapper = document.querySelector(".code-editor-wrapper");
+    if (wrapper) {
+      const wrapperText = extractCodeFromWrapper(wrapper);
+      if (wrapperText && wrapperText.trim().length > 0) {
+        return cleanCodeText(wrapperText);
+      }
+    }
+
+    // 3. Try Monaco Editor View Lines DOM
+    const monacoLines = document.querySelectorAll(".monaco-editor .view-line");
+    if (monacoLines && monacoLines.length > 0) {
+      const lines = Array.from(monacoLines).map((l) => l.textContent || "").join("\n");
+      if (lines.trim().length > 0) {
+        return cleanCodeText(lines);
+      }
+    }
+
+    // 4. Try CodeMirror / Pre / Code tags
+    const preCode = document.querySelector("main pre, pre code, .cm-content");
+    if (preCode && preCode.textContent && preCode.textContent.trim().length > 0) {
+      return cleanCodeText(preCode.textContent);
+    }
+
+    // 5. Try main container innerText fallback
+    const mainEl = document.querySelector("main") || document.querySelector(".code-editor-wrapper")?.parentElement;
+    if (mainEl) {
+      const mainText = extractCodeFromWrapper(mainEl);
+      if (mainText && mainText.trim().length > 0) {
+        return cleanCodeText(mainText);
+      }
+    }
+
+    return "";
   }
 
-  // Request code from Injected script (Monaco / React Fiber)
+  // Extract clean code text from wrapper element
+  function extractCodeFromWrapper(container) {
+    // Clone container to strip out non-code headers/buttons
+    const clone = container.cloneNode(true);
+
+    // Remove buttons, toolbars, line-numbers gutters if present
+    const unwanted = clone.querySelectorAll("button, header, .line-numbers, svg, [data-testid='tab']");
+    unwanted.forEach((el) => el.remove());
+
+    const text = clone.innerText || clone.textContent || "";
+    return text;
+  }
+
+  // Clean code text (remove line number prefixes if mixed in)
+  function cleanCodeText(raw) {
+    if (!raw) return "";
+    let lines = raw.split("\n");
+
+    // If lines start with line number format like "1  import ..."
+    const firstNonEmpty = lines.find((l) => l.trim().length > 0);
+    if (firstNonEmpty && /^\d+\s{2,}/.test(firstNonEmpty)) {
+      lines = lines.map((l) => l.replace(/^\d+\s{1,4}/, ""));
+    }
+
+    return lines.join("\n");
+  }
+
+  // Request code from injected script
   function requestActiveCodeFromInjected(filePath) {
     return new Promise((resolve) => {
       const reqId = "req_" + Math.random().toString(36).substr(2, 9);
       const timeout = setTimeout(() => {
         window.removeEventListener("message", handler);
         resolve(null);
-      }, 400);
+      }, 300);
 
       function handler(event) {
         if (event.data && event.data.type === "LCD_RESPONSE_ACTIVE_CODE" && event.data.reqId === reqId) {
@@ -518,95 +569,6 @@
       window.addEventListener("message", handler);
       window.postMessage({ type: "LCD_REQUEST_ACTIVE_CODE", filePath, reqId }, "*");
     });
-  }
-
-  // Extract full editor content without truncation
-  async function getFullEditorContent(filePath) {
-    // 1. Intercept official Lovable Download button click (Highest Fidelity)
-    const downloadedContent = await requestInterceptDownloadClick();
-    if (downloadedContent && typeof downloadedContent === "string" && downloadedContent.trim().length > 0) {
-      return downloadedContent;
-    }
-
-    // 2. Direct Monaco API via Injected Script
-    const directCode = await requestActiveCodeFromInjected(filePath);
-    if (directCode && typeof directCode === "string" && directCode.trim().length > 0) {
-      return directCode;
-    }
-
-    // 3. Monaco Editor DOM Line Accumulator (Scrolls editor to get all lines)
-    const domCode = await readEditorDOMWithScroll();
-    if (domCode && domCode.trim().length > 0) {
-      return domCode;
-    }
-
-    return (await requestActiveCodeFromInjected(filePath)) || readEditorContentDOM() || "";
-  }
-
-  // Read Monaco Editor DOM lines with auto-scroll
-  async function readEditorDOMWithScroll() {
-    const editorScroll = document.querySelector(".monaco-scrollable-element, .monaco-editor .overflow-guard, .code-editor-wrapper");
-    if (!editorScroll) return readEditorContentDOM();
-
-    const collectedLines = new Map(); // lineTop/lineIndex -> text
-
-    // Helper to capture currently visible lines
-    const captureVisibleLines = () => {
-      const lineEls = document.querySelectorAll(".monaco-editor .view-line");
-      for (const line of lineEls) {
-        const top = parseFloat(line.style.top) || line.offsetTop || 0;
-        const text = line.textContent || "";
-        collectedLines.set(top, text);
-      }
-    };
-
-    captureVisibleLines();
-
-    // Scroll down if scrollable
-    const maxScroll = editorScroll.scrollHeight - editorScroll.clientHeight;
-    if (maxScroll > 50) {
-      for (let s = 0; s <= maxScroll + 200; s += 250) {
-        editorScroll.scrollTop = s;
-        await sleep(30);
-        captureVisibleLines();
-      }
-      editorScroll.scrollTop = 0;
-    }
-
-    if (collectedLines.size > 0) {
-      // Sort lines by vertical position
-      const sorted = Array.from(collectedLines.entries())
-        .sort((a, b) => a[0] - b[0])
-        .map((e) => e[1]);
-      return sorted.join("\n");
-    }
-
-    return readEditorContentDOM();
-  }
-
-  // Fallback DOM reader
-  function readEditorContentDOM() {
-    // 1. Monaco Editor View Lines
-    const monacoLines = document.querySelectorAll(".monaco-editor .view-line");
-    if (monacoLines && monacoLines.length > 0) {
-      return Array.from(monacoLines)
-        .map((l) => l.textContent || "")
-        .join("\n");
-    }
-
-    // 2. Pre / Code block
-    const codeTag = document.querySelector("main pre code, .code-viewer pre, pre code, pre");
-    if (codeTag) {
-      return codeTag.textContent || "";
-    }
-
-    // 3. Textarea
-    const textarea = document.querySelector(".monaco-editor textarea, main textarea");
-    if (textarea && textarea.value) {
-      return textarea.value;
-    }
-
-    return "";
   }
 
   // Listen for messages from popup
