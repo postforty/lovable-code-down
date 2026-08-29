@@ -13,9 +13,23 @@
 
   let latestDownloadedText = null;
   let latestDownloadedBlob = null;
+  let latestCopiedText = null;
   let interceptActive = false;
 
-  // 1. Hook URL.createObjectURL to intercept Blobs created by Lovable's Download button
+  // 1. Hook navigator.clipboard.writeText to intercept "Copy file content" button
+  if (navigator.clipboard) {
+    const originalWriteText = navigator.clipboard.writeText;
+    navigator.clipboard.writeText = function (text) {
+      if (interceptActive) {
+        latestCopiedText = text;
+        // Resolve immediately so the page thinks it succeeded, without altering user clipboard
+        return Promise.resolve();
+      }
+      return originalWriteText.apply(this, arguments);
+    };
+  }
+
+  // 2. Hook URL.createObjectURL to intercept Blobs created by Lovable's Download button
   const originalCreateObjectURL = URL.createObjectURL;
   URL.createObjectURL = function (obj) {
     if (interceptActive && obj instanceof Blob) {
@@ -87,7 +101,36 @@
       );
     }
 
-    // C. Active File Code Extraction (Monaco / Fiber)
+    // C. Intercept "Copy file content" button click
+    if (event.data.type === "LCD_REQUEST_COPY_INTERCEPT") {
+      interceptActive = true;
+      latestCopiedText = null;
+
+      const copyBtn = document.querySelector("button[aria-label='Copy file content']");
+      if (copyBtn) {
+        copyBtn.click();
+      }
+
+      // Wait briefly for clipboard API to be called
+      let waitMs = 150;
+      while (waitMs > 0 && !latestCopiedText) {
+        await new Promise((r) => setTimeout(r, 30));
+        waitMs -= 30;
+      }
+
+      interceptActive = false;
+
+      window.postMessage(
+        {
+          type: "LCD_RESPONSE_COPY_INTERCEPT",
+          reqId: event.data.reqId,
+          code: latestCopiedText,
+        },
+        "*"
+      );
+    }
+
+    // D. Active File Code Extraction (Monaco / Fiber fallback)
     if (event.data.type === "LCD_REQUEST_ACTIVE_CODE") {
       const code = getFullActiveCode(event.data.filePath);
       window.postMessage(

@@ -213,25 +213,38 @@
     addLog("Lovable 소스코드 추출 엔진 시작", "info");
 
     try {
-      // 1. Ensure Code Tab is active
-      await ensureCodeViewActive();
+      let collectedFiles = {};
 
-      // 2. Locate Shadow Root
-      const shadowRoot = await getTreeShadowRoot();
-      if (!shadowRoot) {
-        throw new Error("<file-tree-container> Shadow Root를 찾을 수 없습니다. 코드 패널을 확인해 주세요.");
+      // 1. 최우선: React State Bulk Extraction 시도 (100% 무손실, 초고속)
+      addLog("🧠 React 내부 메모리 저장소(TanStack Query/Fiber) 스캔 중...", "info");
+      const bulkFiles = await requestBulkStateExtraction();
+
+      if (bulkFiles && Object.keys(bulkFiles).length > 3) {
+        addLog(`✨ 성공! 메모리 저장소에서 ${Object.keys(bulkFiles).length}개의 원본 코드를 즉시 추출했습니다. (무손실)`, "success");
+        collectedFiles = bulkFiles;
+      } else {
+        addLog("⚠ 전체 프로젝트 정보를 찾지 못했습니다. DOM 스크롤 가상화 추출 엔진으로 폴백(Fallback)합니다.", "warning");
+        
+        // 2. Ensure Code Tab is active
+        await ensureCodeViewActive();
+
+        // 3. Locate Shadow Root
+        const shadowRoot = await getTreeShadowRoot();
+        if (!shadowRoot) {
+          throw new Error("<file-tree-container> Shadow Root를 찾을 수 없습니다. 코드 패널을 확인해 주세요.");
+        }
+
+        const scrollContainer = findScrollContainer(shadowRoot);
+        addLog("✔ Shadow DOM 탐색기 연결 완료", "success");
+
+        // 4. Step 1: Expand ALL folders with Virtual Scrolling
+        addLog("📁 파일 트리의 모든 폴더를 여는 중...", "info");
+        await expandAllFoldersWithScroll(shadowRoot, scrollContainer);
+
+        // 5. Step 2: Collect ALL files with Virtual Scrolling
+        addLog("🔍 전체 파일 탐색 및 소스코드 수집 시작...", "info");
+        collectedFiles = await collectAllFilesWithScroll(shadowRoot, scrollContainer);
       }
-
-      const scrollContainer = findScrollContainer(shadowRoot);
-      addLog("✔ Shadow DOM 탐색기 연결 완료", "success");
-
-      // 3. Step 1: Expand ALL folders with Virtual Scrolling
-      addLog("📁 파일 트리의 모든 폴더를 여는 중...", "info");
-      await expandAllFoldersWithScroll(shadowRoot, scrollContainer);
-
-      // 4. Step 2: Collect ALL files with Virtual Scrolling
-      addLog("🔍 전체 파일 탐색 및 소스코드 수집 시작...", "info");
-      const collectedFiles = await collectAllFilesWithScroll(shadowRoot, scrollContainer);
 
       if (shouldAbort) {
         addLog("수집 작업이 중단되었습니다.", "warning");
@@ -246,7 +259,7 @@
       addLog(`✨ 총 ${fileCount}개 파일 수집 완료! ZIP 압축 생성 중...`, "success");
       updateProgress(90, "", "ZIP 파일 패키징 중...");
 
-      // 5. Generate ZIP
+      // Generate ZIP
       const zip = new JSZip();
       for (const [path, content] of Object.entries(collectedFiles)) {
         zip.file(path, content);
@@ -259,7 +272,7 @@
         compressionOptions: { level: 6 },
       });
 
-      // 6. Trigger Browser Download
+      // Trigger Browser Download
       const fileName = `${projectName}.zip`;
       const downloadUrl = URL.createObjectURL(zipBlob);
       const a = document.createElement("a");
@@ -285,6 +298,27 @@
       isExtracting = false;
       if (startBtn) startBtn.disabled = false;
     }
+  }
+
+  // Request bulk extraction from React state via injected script
+  function requestBulkStateExtraction() {
+    return new Promise((resolve) => {
+      const timeout = setTimeout(() => {
+        window.removeEventListener("message", handler);
+        resolve(null);
+      }, 2000);
+
+      function handler(event) {
+        if (event.data && event.data.type === "LCD_RESPONSE_STATE_EXTRACTION") {
+          clearTimeout(timeout);
+          window.removeEventListener("message", handler);
+          resolve(event.data.files);
+        }
+      }
+
+      window.addEventListener("message", handler);
+      window.postMessage({ type: "LCD_REQUEST_STATE_EXTRACTION" }, "*");
+    });
   }
 
   // Ensure "Code" / "코드" tab is clicked and active
@@ -478,7 +512,17 @@
   // ----------------------------------------------------
 
   async function getEditorContentRobust(filePath) {
-    // 1. Try Injected script (Monaco / React Fiber)
+    // 1. 최우선: "Copy file content" 버튼 훅 활용 (에디터 내장 기능, 100% 무손실)
+    try {
+      const copiedCode = await requestCopyInterceptFromInjected();
+      if (copiedCode && typeof copiedCode === "string" && copiedCode.length > 0) {
+        return copiedCode; // 완벽한 원본 코드를 그대로 반환
+      }
+    } catch (err) {
+      console.warn("Copy button intercept failed:", err);
+    }
+
+    // 2. Try Injected script (Monaco / React Fiber)
     try {
       const injectedCode = await requestActiveCodeFromInjected(filePath);
       if (injectedCode && typeof injectedCode === "string" && injectedCode.trim().length > 0) {
@@ -528,7 +572,9 @@
     const clone = container.cloneNode(true);
 
     // Remove buttons, toolbars, line-numbers gutters if present
-    const unwanted = clone.querySelectorAll("button, header, .line-numbers, svg, [data-testid='tab']");
+    const unwanted = clone.querySelectorAll(
+      "button, header, .line-numbers, .margin, .margin-view-overlays, svg, [data-testid='tab']"
+    );
     unwanted.forEach((el) => el.remove());
 
     const text = clone.innerText || clone.textContent || "";
@@ -540,13 +586,34 @@
     if (!raw) return "";
     let lines = raw.split("\n");
 
-    // If lines start with line number format like "1  import ..."
-    const firstNonEmpty = lines.find((l) => l.trim().length > 0);
-    if (firstNonEmpty && /^\d+\s{2,}/.test(firstNonEmpty)) {
-      lines = lines.map((l) => l.replace(/^\d+\s{1,4}/, ""));
+    // Remove empty trailing lines
+    while (lines.length > 0 && lines[lines.length - 1].trim() === "") {
+      lines.pop();
     }
 
     return lines.join("\n");
+  }
+
+  // Request copy button interception from injected script
+  function requestCopyInterceptFromInjected() {
+    return new Promise((resolve) => {
+      const reqId = "req_" + Math.random().toString(36).substr(2, 9);
+      const timeout = setTimeout(() => {
+        window.removeEventListener("message", handler);
+        resolve(null);
+      }, 400);
+
+      function handler(event) {
+        if (event.data && event.data.type === "LCD_RESPONSE_COPY_INTERCEPT" && event.data.reqId === reqId) {
+          clearTimeout(timeout);
+          window.removeEventListener("message", handler);
+          resolve(event.data.code);
+        }
+      }
+
+      window.addEventListener("message", handler);
+      window.postMessage({ type: "LCD_REQUEST_COPY_INTERCEPT", reqId }, "*");
+    });
   }
 
   // Request code from injected script
