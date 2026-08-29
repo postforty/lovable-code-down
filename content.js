@@ -1,6 +1,6 @@
 /**
- * Lovable Code Downloader - Content Script (v1.0.2)
- * Robust TreeWalker-based file tree extractor and ZIP downloader.
+ * Lovable Code Downloader - Content Script (v1.0.3)
+ * Custom element <file-tree-container> Shadow DOM extractor & ZIP downloader.
  */
 
 (function () {
@@ -14,26 +14,13 @@
 
   const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
-  // Initialize
+  // Initialize UI
   function init() {
-    injectMainWorldScript();
     createFloatingButton();
     createProgressModal();
   }
 
-  // Inject script to access window/React context
-  function injectMainWorldScript() {
-    try {
-      const script = document.createElement("script");
-      script.src = chrome.runtime.getURL("injected.js");
-      (document.head || document.documentElement).appendChild(script);
-      script.onload = () => script.remove();
-    } catch (e) {
-      console.warn("[LCD] Main world injection error:", e);
-    }
-  }
-
-  // Project name
+  // Get project name
   function getProjectName() {
     const titleEl =
       document.querySelector("header h1, header h2") ||
@@ -100,7 +87,7 @@
           </button>
         </div>
         <div class="lcd-modal-body">
-          <p id="lcd-modal-desc">파일 트리의 모든 소스 코드를 추출하여 ZIP으로 다운로드합니다.</p>
+          <p id="lcd-modal-desc">Shadow DOM 파일 트리의 모든 폴더를 펼치고 소스코드를 ZIP으로 다운로드합니다.</p>
           <div class="lcd-progress-container">
             <div class="lcd-progress-bar-bg">
               <div class="lcd-progress-bar-fill" id="lcd-progress-fill"></div>
@@ -211,23 +198,26 @@
     if (logBox) logBox.innerHTML = "";
 
     updateProgress(0, "", "준비 중...");
-    addLog("Lovable 코드 수집 프로세스 시작", "info");
+    addLog("Lovable 코드 일괄 다운로드 프로세스 시작", "info");
 
     try {
       // 1. Ensure Code Tab is active
       await ensureCodeViewActive();
 
-      // 2. Try fast in-memory extraction
-      addLog("메모리 상태 고속 추출(Fast Mode) 시도 중...", "info");
-      let collectedFiles = await requestStateFromInjected();
-
-      if (collectedFiles && Object.keys(collectedFiles).length > 0) {
-        addLog(`⚡ 고속 추출 성공! ${Object.keys(collectedFiles).length}개 파일 확보`, "success");
-      } else {
-        // 3. TreeWalker-based DOM Crawler
-        addLog("TreeWalker 기반 정밀 파일 탐색 시작...", "info");
-        collectedFiles = await runTreeWalkerCrawler();
+      // 2. Find <file-tree-container> and get its Shadow Root
+      const shadowRoot = await getTreeShadowRoot();
+      if (!shadowRoot) {
+        throw new Error("<file-tree-container> 또는 Shadow Root를 찾을 수 없습니다. 코드 패널이 열려 있는지 확인해 주세요.");
       }
+
+      addLog("✔ <file-tree-container> Shadow Root 접근 성공", "success");
+
+      // 3. Expand all folders in Shadow DOM
+      addLog("📁 파일 트리의 모든 폴더를 자동으로 여는 중...", "info");
+      await expandAllFoldersInShadowRoot(shadowRoot);
+
+      // 4. Collect all file items
+      const collectedFiles = await collectFilesFromShadowTree(shadowRoot);
 
       if (shouldAbort) {
         addLog("작업이 사용자에 의해 중단되었습니다.", "warning");
@@ -236,13 +226,13 @@
 
       const fileCount = Object.keys(collectedFiles).length;
       if (fileCount === 0) {
-        throw new Error("수집된 파일이 없습니다. 화면 좌측/중앙에 파일 목록이 열려 있는지 확인해 주세요.");
+        throw new Error("수집된 파일이 없습니다. 파일 목록을 다시 확인해 주세요.");
       }
 
-      addLog(`✨ 총 ${fileCount}개 파일 수집 완료! ZIP 압축 생성 중...`, "success");
-      updateProgress(90, "", "ZIP 압축 패키징 중...");
+      addLog(`✨ 총 ${fileCount}개 파일 수집 완료! ZIP 압축 중...`, "success");
+      updateProgress(90, "", "ZIP 압축 생성 중...");
 
-      // 4. Bundle into ZIP
+      // 5. Generate ZIP
       const zip = new JSZip();
       for (const [path, content] of Object.entries(collectedFiles)) {
         zip.file(path, content);
@@ -255,7 +245,7 @@
         compressionOptions: { level: 6 },
       });
 
-      // 5. Trigger Browser Download
+      // 6. Trigger Browser Download
       const fileName = `${projectName}.zip`;
       const downloadUrl = URL.createObjectURL(zipBlob);
       const a = document.createElement("a");
@@ -270,8 +260,8 @@
       }, 3000);
 
       updateProgress(100, fileName, "다운로드 완료!");
-      addLog(`🎉 성공: '${fileName}' 다운로드가 시작되었습니다.`, "success");
-      showToast(`🎉 '${fileName}' 다운로드가 완료되었습니다!`);
+      addLog(`🎉 성공: '${fileName}' 다운로드가 완료되었습니다!`, "success");
+      showToast(`🎉 '${fileName}' 다운로드가 시작되었습니다!`);
     } catch (err) {
       console.error("[Lovable Code Downloader]", err);
       addLog(`❌ 오류: ${err.message}`, "warning");
@@ -304,224 +294,101 @@
     }
   }
 
-  // Request state from injected script
-  function requestStateFromInjected() {
-    return new Promise((resolve) => {
-      const timeout = setTimeout(() => {
-        window.removeEventListener("message", handler);
-        resolve(null);
-      }, 600);
-
-      function handler(event) {
-        if (event.data && event.data.type === "LCD_RESPONSE_STATE_EXTRACTION") {
-          clearTimeout(timeout);
-          window.removeEventListener("message", handler);
-          resolve(event.data.files);
-        }
+  // Locate <file-tree-container> Shadow Root
+  async function getTreeShadowRoot() {
+    for (let retry = 0; retry < 10; retry++) {
+      const el = document.querySelector("file-tree-container");
+      if (el && el.shadowRoot) {
+        return el.shadowRoot;
       }
-
-      window.addEventListener("message", handler);
-      window.postMessage({ type: "LCD_REQUEST_STATE_EXTRACTION" }, "*");
-    });
+      // If shadowRoot not directly attached, check child templates or querySelector
+      if (el) {
+        const shadow = el.shadowRoot || el;
+        return shadow;
+      }
+      await sleep(200);
+    }
+    return null;
   }
 
-  // ----------------------------------------------------
-  // TreeWalker-based File Crawler
-  // ----------------------------------------------------
+  // Expand all folder buttons in Shadow DOM
+  async function expandAllFoldersInShadowRoot(shadowRoot) {
+    let hasMoreToOpen = true;
+    let passes = 0;
 
-  async function runTreeWalkerCrawler() {
+    while (hasMoreToOpen && passes < 12) {
+      if (shouldAbort) break;
+      passes++;
+      hasMoreToOpen = false;
+
+      // Select all folder buttons with aria-expanded="false"
+      const closedFolders = Array.from(
+        shadowRoot.querySelectorAll("button[data-item-type='folder'][aria-expanded='false']")
+      );
+
+      for (const btn of closedFolders) {
+        if (shouldAbort) break;
+        const folderPath = btn.getAttribute("data-item-path") || btn.getAttribute("aria-label");
+        addLog(`📂 폴더 열기: ${folderPath}`, "info");
+
+        btn.scrollIntoView({ block: "nearest" });
+        btn.click();
+        hasMoreToOpen = true;
+        await sleep(80);
+      }
+
+      if (hasMoreToOpen) {
+        await sleep(150);
+      }
+    }
+  }
+
+  // Collect all files from Shadow Root tree items
+  async function collectFilesFromShadowTree(shadowRoot) {
     const files = {};
 
-    // 1. Expand all folders
-    addLog("📁 모든 폴더 열기(Expand) 진행 중...", "info");
-    await expandAllFoldersViaTreeWalker();
+    // Discover all file buttons
+    const fileButtons = Array.from(
+      shadowRoot.querySelectorAll("button[data-item-type='file']")
+    );
 
-    // 2. Discover all file nodes across DOM
-    const fileItems = discoverFileItemsViaTreeWalker();
-    addLog(`🔍 총 ${fileItems.length}개의 소스코드 파일 발견됨`, "info");
+    addLog(`🔍 총 ${fileButtons.length}개의 소스코드 파일 발견됨`, "success");
 
-    if (fileItems.length === 0) {
-      // Debug log: print sample text nodes found on page
-      dumpDebugTextNodes();
-      return files;
-    }
+    const total = fileButtons.length;
 
-    const total = fileItems.length;
-
-    // 3. Click each file and read content
     for (let i = 0; i < total; i++) {
       if (shouldAbort) break;
 
-      const item = fileItems[i];
-      updateProgress(((i + 1) / total) * 85, item.fullPath, `파일 수집 중 (${i + 1}/${total})`);
+      const btn = fileButtons[i];
+      const rawPath = btn.getAttribute("data-item-path") || btn.getAttribute("aria-label");
+      // Clean up path (remove leading slashes if any)
+      const cleanPath = rawPath.replace(/^\//, "");
+
+      updateProgress(((i + 1) / total) * 85, cleanPath, `파일 수집 중 (${i + 1}/${total})`);
 
       try {
-        // Scroll element into view and trigger click
-        const clickable = item.element;
-        clickable.scrollIntoView({ block: "nearest", inline: "nearest" });
+        // Scroll and click the file button to trigger editor rendering
+        btn.scrollIntoView({ block: "nearest" });
+        btn.click();
 
-        clickable.dispatchEvent(new MouseEvent("mousedown", { bubbles: true, cancelable: true }));
-        clickable.dispatchEvent(new MouseEvent("click", { bubbles: true, cancelable: true }));
-        clickable.dispatchEvent(new MouseEvent("mouseup", { bubbles: true, cancelable: true }));
-
-        // Wait for Code Editor to load
-        await sleep(300);
+        // Wait for Code Editor to load content
+        await sleep(250);
 
         const content = await getEditorContentWithPolling();
-        files[item.fullPath] = content;
-        addLog(`✔ ${item.fullPath} (${content.length} chars)`, "info");
+        files[cleanPath] = content;
+        addLog(`✔ ${cleanPath} (${content.length} chars)`, "info");
       } catch (err) {
-        addLog(`⚠ ${item.fullPath} 읽기 실패: ${err.message}`, "warning");
-        files[item.fullPath] = `// Error reading file: ${err.message}`;
+        addLog(`⚠ ${cleanPath} 읽기 실패: ${err.message}`, "warning");
+        files[cleanPath] = `// Error reading file: ${err.message}`;
       }
     }
 
     return files;
   }
 
-  // Expand folders by clicking any text node or chevron representing a folder
-  async function expandAllFoldersViaTreeWalker() {
-    for (let loop = 0; loop < 6; loop++) {
-      if (shouldAbort) break;
-
-      const knownFolders = [".lovable", ".wrangler", "public", "src", "components", "ui", "hooks", "lib", "routes", "deploy"];
-      const walker = document.createTreeWalker(document.body, NodeFilter.SHOW_TEXT, null, false);
-      let textNode;
-      let opened = false;
-
-      while ((textNode = walker.nextNode())) {
-        const val = textNode.nodeValue.trim().replace(/^[>›▼▶\s]+/, "");
-        if (!val || val.length > 30) continue;
-
-        // If this text matches a known folder or starts with >
-        const isFolder = knownFolders.some((f) => val === f || val.startsWith(f)) || textNode.nodeValue.includes(">");
-        const isFile = isFileName(val);
-
-        if (isFolder && !isFile) {
-          const parent = textNode.parentElement;
-          if (parent && !parent.hasAttribute("data-lcd-expanded")) {
-            const clickable = parent.closest("div, button, [role='treeitem']") || parent;
-            clickable.dispatchEvent(new MouseEvent("click", { bubbles: true, cancelable: true }));
-            parent.setAttribute("data-lcd-expanded", "true");
-            opened = true;
-            await sleep(80);
-          }
-        }
-      }
-
-      // Also click any collapsed chevron SVGs
-      const svgs = document.querySelectorAll("svg");
-      for (const svg of svgs) {
-        if (svg.innerHTML.includes("polyline") || svg.classList.contains("lucide-chevron-right")) {
-          const btn = svg.closest("button, div.cursor-pointer, div");
-          if (btn && !btn.hasAttribute("data-lcd-svg-clicked")) {
-            btn.dispatchEvent(new MouseEvent("click", { bubbles: true, cancelable: true }));
-            btn.setAttribute("data-lcd-svg-clicked", "true");
-            opened = true;
-            await sleep(60);
-          }
-        }
-      }
-
-      if (!opened) break;
-      await sleep(150);
-    }
-  }
-
-  // Discover all file items using TreeWalker text matching
-  function discoverFileItemsViaTreeWalker() {
-    const fileRegex = /([a-zA-Z0-9_\-\.\/]+\.(?:tsx|ts|js|jsx|json|css|html|md|ico|txt|lock|toml|ya?ml|svg|png|jpg|webp|env|gitignore|prettierignore|prettierrc|eslintrc[a-zA-Z0-9_\-\.]*)|AGENTS\.md|Dockerfile|Makefile|LICENSE|bun\.lock|bunfig\.toml|components\.json|package\.json|README\.md|tsconfig\.json|vite\.config\.ts)/i;
-
-    const walker = document.createTreeWalker(document.body, NodeFilter.SHOW_TEXT, null, false);
-    let textNode;
-    const items = [];
-    const seenPaths = new Set();
-
-    while ((textNode = walker.nextNode())) {
-      const raw = textNode.nodeValue.trim();
-      if (!raw || raw.length > 80) continue;
-
-      // Extract filename from text (handles cases like "{ } package.json" or "MI AGENTS.md")
-      const match = raw.match(fileRegex);
-      if (match && match[1]) {
-        const fileName = match[1];
-        const parent = textNode.parentElement;
-        if (!parent || parent.closest("#lcd-modal") || parent.closest("#lcd-floating-btn")) {
-          continue;
-        }
-
-        const clickable = parent.closest("button, div[role='treeitem'], div.cursor-pointer, div.flex, div") || parent;
-        const fullPath = calculatePath(parent, fileName);
-
-        if (!seenPaths.has(fullPath)) {
-          seenPaths.add(fullPath);
-          items.push({
-            name: fileName,
-            fullPath: fullPath,
-            element: clickable,
-          });
-        }
-      }
-    }
-
-    return items;
-  }
-
-  // Check if string is a file name
-  function isFileName(str) {
-    const clean = str.replace(/^[>›▼▶{}\s]+/, "").trim();
-    return /\.(tsx|ts|js|jsx|json|css|html|md|ico|txt|lock|toml|ya?ml|svg|png|jpg|env|gitignore|prettier.*|eslint.*)$/i.test(clean) ||
-      ["Dockerfile", "Makefile", "LICENSE", "AGENTS.md", "README.md", "bun.lock", "bunfig.toml", "components.json"].includes(clean);
-  }
-
-  // Calculate hierarchical path
-  function calculatePath(el, fileName) {
-    const parts = [];
-    let current = el.parentElement;
-
-    while (current && current !== document.body && parts.length < 5) {
-      // Find sibling or parent folder name
-      const folderEl = current.querySelector(":scope > button, :scope > div.font-medium, :scope > span, :scope > div");
-      if (folderEl && folderEl !== el) {
-        const text = folderEl.textContent.trim().replace(/^[>›▼▶\s]+/, "");
-        if (text && !text.includes("\n") && !text.includes(".") && text.length < 25) {
-          if (!parts.includes(text)) {
-            parts.unshift(text);
-          }
-        }
-      }
-      current = current.parentElement;
-    }
-
-    // Default structure heuristics if tree hierarchy is flattened
-    if (parts.length === 0) {
-      if (["favicon.ico", "robots.txt"].includes(fileName)) return `public/${fileName}`;
-      if (["router.tsx", "routeTree.gen.ts", "server.ts", "start.ts", "styles.css"].includes(fileName)) return `src/${fileName}`;
-      if (["project.json"].includes(fileName)) return `.lovable/${fileName}`;
-    }
-
-    return parts.length > 0 ? `${parts.join("/")}/${fileName}` : fileName;
-  }
-
-  // Dump sample text nodes for debugging if no files found
-  function dumpDebugTextNodes() {
-    const walker = document.createTreeWalker(document.body, NodeFilter.SHOW_TEXT, null, false);
-    let node;
-    let count = 0;
-    const samples = [];
-    while ((node = walker.nextNode()) && count < 8) {
-      const val = node.nodeValue.trim();
-      if (val && val.length < 30 && !val.includes("\n")) {
-        samples.push(val);
-        count++;
-      }
-    }
-    addLog(`발견된 텍스트 샘플: ${samples.join(", ")}`, "warning");
-  }
-
   // Extract editor content with polling
   async function getEditorContentWithPolling() {
-    let retries = 6;
+    let retries = 8;
     while (retries > 0) {
       const code = readEditorContent();
       if (code && code.trim().length > 0) {
@@ -535,7 +402,7 @@
 
   // Read editor content from Monaco, CodeMirror, or DOM
   function readEditorContent() {
-    // 1. Monaco Editor Models
+    // 1. Monaco Editor Models (Global)
     if (window.monaco && window.monaco.editor) {
       const models = window.monaco.editor.getModels();
       if (models && models.length > 0) {
@@ -543,7 +410,7 @@
       }
     }
 
-    // 2. Monaco Editor View Lines
+    // 2. Monaco Editor View Lines DOM
     const monacoLines = document.querySelectorAll(".monaco-editor .view-line");
     if (monacoLines && monacoLines.length > 0) {
       return Array.from(monacoLines)
@@ -551,7 +418,7 @@
         .join("\n");
     }
 
-    // 3. CodeMirror
+    // 3. CodeMirror Lines
     const cmLines = document.querySelectorAll(".cm-line");
     if (cmLines && cmLines.length > 0) {
       return Array.from(cmLines)
