@@ -1,35 +1,23 @@
 /**
- * Lovable Code Downloader - Content Script (v1.0.9)
- * Universal Editor Text Extractor for .code-editor-wrapper and all editor engines.
+ * Lovable Code Downloader - Content Script (v1.1.3)
+ * Universal Editor Text Extractor for CodeMirror 6, Monaco, and React SPAs.
  */
 
 (function () {
   if (window.__LOVABLE_CODE_DOWNLOADER_INJECTED__) return;
   window.__LOVABLE_CODE_DOWNLOADER_INJECTED__ = true;
 
-  console.log("⚡ Lovable Code Downloader active.");
+  console.log("⚡ Lovable Code Downloader (v1.1.3) active.");
 
   let isExtracting = false;
   let shouldAbort = false;
 
   const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
-  // Initialize UI & Main World Injected Script
+  // Initialize UI
   function init() {
-    injectMainWorldScript();
     createFloatingButton();
     createProgressModal();
-  }
-
-  // Inject script into page context
-  function injectMainWorldScript() {
-    try {
-      const script = document.createElement("script");
-      script.src = chrome.runtime.getURL("injected.js");
-      (document.head || document.documentElement).appendChild(script);
-    } catch (e) {
-      console.warn("[LCD] Main world injection error:", e);
-    }
   }
 
   // Project name
@@ -210,40 +198,31 @@
     if (logBox) logBox.innerHTML = "";
 
     updateProgress(0, "", "준비 중...");
-    addLog("Lovable 소스코드 추출 엔진 시작", "info");
+    addLog("Lovable 정밀 소스코드 추출 엔진 시작", "info");
 
     try {
       let collectedFiles = {};
 
-      // 1. 최우선: React State Bulk Extraction 시도 (100% 무손실, 초고속)
-      addLog("🧠 React 내부 메모리 저장소(TanStack Query/Fiber) 스캔 중...", "info");
+      // 1. 최우선: React State Bulk Extraction 시도 (정밀 검증)
+      addLog("🧠 React 내부 메모리 저장소(TanStack Query/Fiber) 검증 스캔 중...", "info");
       const bulkFiles = await requestBulkStateExtraction();
 
-      if (bulkFiles && Object.keys(bulkFiles).length > 3) {
+      if (bulkFiles && Object.keys(bulkFiles).length >= 4) {
         addLog(`✨ 성공! 메모리 저장소에서 ${Object.keys(bulkFiles).length}개의 원본 코드를 즉시 추출했습니다. (무손실)`, "success");
         collectedFiles = bulkFiles;
       } else {
-        addLog("⚠ 전체 프로젝트 정보를 찾지 못했습니다. DOM 스크롤 가상화 추출 엔진으로 폴백(Fallback)합니다.", "warning");
-        
+        addLog("ℹ 파일 트리 직접 탐색 및 CodeMirror 6 정밀 버퍼 추출 엔진으로 진행합니다.", "info");
+
         // 2. Ensure Code Tab is active
         await ensureCodeViewActive();
 
-        // 3. Locate Shadow Root
-        const shadowRoot = await getTreeShadowRoot();
-        if (!shadowRoot) {
-          throw new Error("<file-tree-container> Shadow Root를 찾을 수 없습니다. 코드 패널을 확인해 주세요.");
-        }
-
-        const scrollContainer = findScrollContainer(shadowRoot);
-        addLog("✔ Shadow DOM 탐색기 연결 완료", "success");
-
-        // 4. Step 1: Expand ALL folders with Virtual Scrolling
+        // 3. Step 1: Expand ALL folders
         addLog("📁 파일 트리의 모든 폴더를 여는 중...", "info");
-        await expandAllFoldersWithScroll(shadowRoot, scrollContainer);
+        await expandAllTreeFolders();
 
-        // 5. Step 2: Collect ALL files with Virtual Scrolling
-        addLog("🔍 전체 파일 탐색 및 소스코드 수집 시작...", "info");
-        collectedFiles = await collectAllFilesWithScroll(shadowRoot, scrollContainer);
+        // 4. Step 2: Collect ALL files
+        addLog("🔍 전체 파일 탐색 및 소스코드 정밀 수집 시작...", "info");
+        collectedFiles = await collectAllTreeFiles();
       }
 
       if (shouldAbort) {
@@ -306,7 +285,7 @@
       const timeout = setTimeout(() => {
         window.removeEventListener("message", handler);
         resolve(null);
-      }, 2000);
+      }, 1500);
 
       function handler(event) {
         if (event.data && event.data.type === "LCD_RESPONSE_STATE_EXTRACTION") {
@@ -342,157 +321,260 @@
     }
   }
 
-  // Locate <file-tree-container> Shadow Root
-  async function getTreeShadowRoot() {
-    for (let retry = 0; retry < 10; retry++) {
-      const el = document.querySelector("file-tree-container");
-      if (el && el.shadowRoot) {
-        return el.shadowRoot;
-      }
-      if (el) return el.shadowRoot || el;
-      await sleep(200);
+  // Find all tree items across document and Shadow DOMs
+  function getAllTreeElements() {
+    const items = [];
+
+    // Check document
+    document.querySelectorAll("[role='treeitem'], button[data-item-type]").forEach((el) => items.push(el));
+
+    // Check custom element shadowRoot
+    const customTree = document.querySelector("file-tree-container");
+    if (customTree && customTree.shadowRoot) {
+      customTree.shadowRoot.querySelectorAll("[role='treeitem'], button[data-item-type]").forEach((el) => items.push(el));
     }
-    return null;
+
+    return items;
   }
 
-  // Find scrollable container inside Shadow DOM or host
-  function findScrollContainer(shadowRoot) {
-    const scrollEl =
-      shadowRoot.querySelector("[data-file-tree-virtualized-scroll='true']") ||
-      shadowRoot.querySelector("[role='tree']") ||
-      shadowRoot.querySelector("div[style*='overflow']") ||
-      shadowRoot.firstElementChild;
-
-    return scrollEl || document.body;
+  function isFolderItem(el, label) {
+    if (el.hasAttribute("aria-expanded")) return true;
+    if (el.getAttribute("data-item-type") === "folder") return true;
+    
+    // Known Lovable folders
+    const knownFolders = [".lovable", "src", "public", "assets", "components", "ui", "hooks", "lib", "routes", "pages", "utils", "styles"];
+    if (knownFolders.includes(label)) return true;
+    
+    // Heuristic: If it has NO extension and is not a dotfile, it's highly likely a folder
+    const hasExtension = /\.[a-zA-Z0-9]+$/.test(label);
+    const isDotFile = /^\.[a-zA-Z0-9]+$/.test(label);
+    
+    if (!hasExtension && !isDotFile) return true;
+    
+    return false;
   }
 
-  // Expand all folders while scrolling through the virtualized list
-  async function expandAllFoldersWithScroll(shadowRoot, scrollContainer) {
+  function getLabel(btn) {
+    let label = btn.getAttribute("aria-label") || "";
+    if (!label) {
+      label = btn.innerText || btn.textContent || "";
+      label = label.split('\n')[0].trim();
+    }
+    return label;
+  }
+
+  function getIndent(btn, label) {
+    const ariaLevel = btn.getAttribute("aria-level");
+    if (ariaLevel) return parseInt(ariaLevel, 10) * 100;
+    
+    const style = window.getComputedStyle(btn);
+    let pl = parseFloat(style.paddingLeft) || 0;
+    let innerLeft = btn.getBoundingClientRect().left;
+    
+    const walker = document.createTreeWalker(btn, NodeFilter.SHOW_TEXT, null, false);
+    let node;
+    while ((node = walker.nextNode())) {
+      const text = node.textContent.trim();
+      if (text.length > 0 && label.includes(text)) {
+        if (node.parentElement) {
+          innerLeft = node.parentElement.getBoundingClientRect().left;
+          break;
+        }
+      }
+    }
+    return Math.round((pl + innerLeft) / 6) * 6;
+  }
+
+  async function scrollToTreeTop() {
+    let firstVisible = null;
+    for (let i = 0; i < 15; i++) {
+      let visible = getAllTreeElements().filter(el => el.getBoundingClientRect().height > 0);
+      if (visible.length === 0) break;
+      if (firstVisible === visible[0]) break; // Reached the top
+      firstVisible = visible[0];
+      firstVisible.scrollIntoView({ block: "end" });
+      await sleep(150);
+    }
+  }
+
+  // Expand all closed folders
+  async function expandAllTreeFolders() {
+    await scrollToTreeTop();
     let hasOpenedNew = true;
     let pass = 0;
+    const clickedFolders = new Set();
 
-    while (hasOpenedNew && pass < 8) {
+    while (hasOpenedNew && pass < 100) {
       if (shouldAbort) break;
       pass++;
       hasOpenedNew = false;
 
-      scrollContainer.scrollTop = 0;
-      await sleep(100);
-
-      let maxScroll = scrollContainer.scrollHeight - scrollContainer.clientHeight;
-      let currentScroll = 0;
-      const step = 200;
-
-      while (currentScroll <= maxScroll + step) {
+      let visibleItems = getAllTreeElements().filter(el => el.getBoundingClientRect().height > 0);
+      let pathStack = [];
+      let foundUnopenedFolder = false;
+      
+      for (let i = 0; i < visibleItems.length; i++) {
         if (shouldAbort) break;
+        
+        let btn = visibleItems[i];
+        let label = getLabel(btn);
+        if (!label || label === "Options") continue;
+        
+        let indent = getIndent(btn, label);
+        
+        while (pathStack.length > 0 && pathStack[pathStack.length - 1].indent >= indent) {
+          pathStack.pop();
+        }
+        
+        if (isFolderItem(btn, label)) {
+           let folderPath = pathStack.map(p => p.name).join('/');
+           let fullPath = folderPath ? `${folderPath}/${label}` : label;
+           pathStack.push({ name: label, indent: indent });
+           
+           if (!clickedFolders.has(fullPath)) {
+               // Check if visually open
+               let isOpen = false;
+               if (btn.getAttribute("aria-expanded") === "true") isOpen = true;
+               else if (i + 1 < visibleItems.length) {
+                   const nextBtn = visibleItems[i + 1];
+                   const nextIndent = getIndent(nextBtn, getLabel(nextBtn));
+                   if (nextIndent > indent) isOpen = true; // Child is visible
+               }
+               
+               if (!isOpen) {
+                   clickedFolders.add(fullPath);
+                   addLog(`📂 폴더 열기 시도: ${fullPath}`, "info");
+                   
+                   btn.scrollIntoView({ block: "center" });
+                   const svg = btn.querySelector("svg");
+                   if (svg) svg.dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true }));
+                   else btn.click();
+                   
+                   await sleep(350); 
+                   hasOpenedNew = true;
+                   foundUnopenedFolder = true;
+                   break;
+               }
+           }
+        }
+      }
+      
+      if (!foundUnopenedFolder) {
+         if (visibleItems.length > 0) {
+             const lastItem = visibleItems[visibleItems.length - 1];
+             lastItem.scrollIntoView({ block: "start" });
+             await sleep(250);
+             let newVisible = getAllTreeElements().filter(el => el.getBoundingClientRect().height > 0);
+             if (newVisible.length > 0 && newVisible[newVisible.length - 1] !== lastItem) {
+                 hasOpenedNew = true; // Found more items down below
+             }
+         }
+      }
+    }
+  }
 
-        const closedFolders = Array.from(
-          shadowRoot.querySelectorAll("button[data-item-type='folder'][aria-expanded='false']")
-        );
+  // Collect all files from the tree
+  async function collectAllTreeFiles() {
+    const files = {};
+    const processedLabels = new Set();
+    
+    await scrollToTreeTop();
+    addLog(`가상화 트리 파일 수집 시작...`, "info");
 
-        for (const btn of closedFolders) {
-          const folderPath = btn.getAttribute("data-item-path") || btn.getAttribute("aria-label");
-          addLog(`📂 폴더 열기: ${folderPath}`, "info");
+    let consecutiveNoNewItems = 0;
 
-          btn.scrollIntoView({ block: "nearest" });
-          btn.click();
-          hasOpenedNew = true;
-          await sleep(60);
+    while (consecutiveNoNewItems < 5) {
+      if (shouldAbort) break;
+      
+      let visibleItems = getAllTreeElements().filter(el => el.getBoundingClientRect().height > 0);
+      let foundNew = false;
+      let pathStack = [];
+
+      for (let i = 0; i < visibleItems.length; i++) {
+        if (shouldAbort) break;
+        
+        let btn = visibleItems[i];
+        let label = getLabel(btn);
+        if (!label || label === "Options" || label === "horizontal") continue;
+        
+        let indent = getIndent(btn, label);
+        
+        // Update path stack based on indentation
+        while (pathStack.length > 0 && pathStack[pathStack.length - 1].indent >= indent) {
+          pathStack.pop();
+        }
+        
+        let isFolder = isFolderItem(btn, label);
+        let folderPath = pathStack.map(p => p.name).join('/');
+        folderPath = folderPath.replace(/\s*\/\s*/g, '/');
+        let fullPath = folderPath ? `${folderPath}/${label}` : label;
+        
+        if (isFolder) {
+          pathStack.push({ name: label, indent: indent });
+          continue; // Skip folders
+        }
+        
+        // Trust the tab if it has a clear full path
+        let finalPath = fullPath;
+        const activeTab = document.querySelector("[role='tab'][aria-selected='true'], [role='tab'][data-state='active'], [role='tab'].active");
+        if (activeTab) {
+          let tabText = activeTab.innerText || activeTab.textContent || "";
+          tabText = tabText.split('\n')[0].replace(/x$/, "").trim();
+          if (tabText.includes("/") && tabText.endsWith(label)) {
+            finalPath = tabText.replace(/^\//, "");
+          }
         }
 
-        currentScroll += step;
-        scrollContainer.scrollTop = currentScroll;
-        await sleep(80);
-        maxScroll = scrollContainer.scrollHeight - scrollContainer.clientHeight;
-      }
-
-      await sleep(150);
-    }
-
-    scrollContainer.scrollTop = 0;
-    await sleep(150);
-  }
-
-  // Collect all files by scrolling through the virtualized tree
-  async function collectAllFilesWithScroll(shadowRoot, scrollContainer) {
-    const files = {};
-    const collectedPaths = new Set();
-
-    // Pass 1: Scroll from TOP to BOTTOM
-    scrollContainer.scrollTop = 0;
-    await sleep(100);
-
-    let maxScroll = scrollContainer.scrollHeight - scrollContainer.clientHeight;
-    let currentScroll = 0;
-    const step = 150;
-
-    while (currentScroll <= maxScroll + step * 2) {
-      if (shouldAbort) break;
-
-      await processVisibleFiles(shadowRoot, files, collectedPaths);
-
-      currentScroll += step;
-      scrollContainer.scrollTop = currentScroll;
-      await sleep(100);
-      maxScroll = scrollContainer.scrollHeight - scrollContainer.clientHeight;
-    }
-
-    // Pass 2: Scroll from BOTTOM to TOP
-    addLog("🔄 역방향 검증 스캔 중...", "info");
-    while (currentScroll >= -step) {
-      if (shouldAbort) break;
-
-      await processVisibleFiles(shadowRoot, files, collectedPaths);
-
-      currentScroll -= step;
-      scrollContainer.scrollTop = Math.max(0, currentScroll);
-      await sleep(80);
-    }
-
-    scrollContainer.scrollTop = 0;
-    return files;
-  }
-
-  // Process currently visible file buttons in Shadow DOM
-  async function processVisibleFiles(shadowRoot, files, collectedPaths) {
-    const visibleFileButtons = Array.from(
-      shadowRoot.querySelectorAll("button[data-item-type='file']")
-    );
-
-    for (const btn of visibleFileButtons) {
-      if (shouldAbort) break;
-
-      const rawPath = btn.getAttribute("data-item-path") || btn.getAttribute("aria-label");
-      if (!rawPath) continue;
-
-      const cleanPath = rawPath.replace(/^\//, "");
-      if (collectedPaths.has(cleanPath)) continue;
-
-      collectedPaths.add(cleanPath);
-      updateProgress(0, cleanPath, `파일 수집 중 (${collectedPaths.size}개 수집됨)`);
-
-      try {
+        if (processedLabels.has(finalPath)) continue;
+        
+        // Found a new file!
+        foundNew = true;
+        processedLabels.add(finalPath);
+        
+        updateProgress(Math.min(90, processedLabels.size * 2), finalPath, `파일 수집 중 (${processedLabels.size}개 완료)`);
+        
         btn.scrollIntoView({ block: "center" });
         btn.click();
-        await sleep(250); // Wait for file to render
-
-        const isImage = /\.(jpg|jpeg|png|webp|gif|ico|svg)$/i.test(cleanPath);
-        if (isImage) {
-          const imgContent = await tryGetImageContent();
-          files[cleanPath] = imgContent || "// Image asset";
-          addLog(`✔ [이미지] ${cleanPath}`, "info");
-        } else {
-          // Extract actual code
-          const content = await getEditorContentRobust(cleanPath);
-          files[cleanPath] = content;
-          const previewSnippet = content.replace(/\s+/g, " ").slice(0, 30);
-          addLog(`✔ ${cleanPath} (${content.length} B) [${previewSnippet}...]`, "info");
+        await sleep(400); // Wait for file to render in CodeMirror
+        
+        try {
+          const isImage = /\.(jpg|jpeg|png|webp|gif|ico|svg)$/i.test(finalPath);
+          if (isImage) {
+            const imgContent = await tryGetImageContent();
+            files[finalPath] = imgContent || "// Image asset";
+            addLog(`✔ [이미지] ${finalPath}`, "info");
+          } else {
+            const content = await getEditorContentRobust(finalPath);
+            if (content !== null && content !== undefined) {
+              files[finalPath] = content;
+              const previewSnippet = content.replace(/\s+/g, " ").slice(0, 30);
+              addLog(`✔ ${finalPath} (${content.length} B) [${previewSnippet}...]`, "info");
+            } else {
+               addLog(`⚠ ${finalPath} 내용을 읽을 수 없습니다. (접근 불가)`, "warning");
+            }
+          }
+        } catch (err) {
+          addLog(`⚠ ${finalPath} 수집 실패: ${err.message}`, "warning");
+          files[finalPath] = `// Error reading file: ${err.message}`;
         }
-      } catch (err) {
-        addLog(`⚠ ${cleanPath} 수집 실패: ${err.message}`, "warning");
-        files[cleanPath] = `// Error reading file: ${err.message}`;
+        
+        break; // Process one file, then rescan visible items to handle virtual shifts
+      }
+      
+      if (!foundNew) {
+         if (visibleItems.length > 0) {
+             const lastItem = visibleItems[visibleItems.length - 1];
+             lastItem.scrollIntoView({ block: "start" });
+             await sleep(250);
+         }
+         consecutiveNoNewItems++;
+      } else {
+         consecutiveNoNewItems = 0;
       }
     }
+
+
+    return files;
   }
 
   // Handle image assets
@@ -512,81 +594,49 @@
   // ----------------------------------------------------
 
   async function getEditorContentRobust(filePath) {
-    // 1. 최우선: "Copy file content" 버튼 훅 활용 (에디터 내장 기능, 100% 무손실)
+    // 1. 최우선: "Copy file content" 버튼 훅 활용 (에디터 내장 기능, 100% 무손실 원본)
     try {
       const copiedCode = await requestCopyInterceptFromInjected();
       if (copiedCode && typeof copiedCode === "string" && copiedCode.length > 0) {
-        return copiedCode; // 완벽한 원본 코드를 그대로 반환
+        return cleanCodeText(copiedCode);
       }
     } catch (err) {
       console.warn("Copy button intercept failed:", err);
     }
 
-    // 2. Try Injected script (Monaco / React Fiber)
+    // 2. 차선: CodeMirror 6 EditorView / Monaco API / React Fiber 인스턴스에서 원본 텍스트 직접 추출
     try {
-      const injectedCode = await requestActiveCodeFromInjected(filePath);
-      if (injectedCode && typeof injectedCode === "string" && injectedCode.trim().length > 0) {
-        return cleanCodeText(injectedCode);
+      const activeCode = await requestActiveCodeFromInjected(filePath);
+      if (activeCode && typeof activeCode === "string" && activeCode.trim().length > 0) {
+        return cleanCodeText(activeCode);
       }
     } catch (_) {}
 
-    // 2. Try extracting from .code-editor-wrapper DOM directly
-    const wrapper = document.querySelector(".code-editor-wrapper");
-    if (wrapper) {
-      const wrapperText = extractCodeFromWrapper(wrapper);
-      if (wrapperText && wrapperText.trim().length > 0) {
-        return cleanCodeText(wrapperText);
+    // 3. 3차: CodeMirror 6 DOM 라인별 파싱 (오직 .cm-editor 내부의 .cm-line만 엄격히 수집)
+    const cmContainer = document.querySelector(".cm-editor, .cm-content");
+    if (cmContainer) {
+      const cmLines = cmContainer.querySelectorAll(".cm-line");
+      if (cmLines.length > 0) {
+        const lines = Array.from(cmLines).map((l) => l.textContent || "").join("\n");
+        if (lines.trim().length > 0) {
+          return cleanCodeText(lines);
+        }
       }
     }
 
-    // 3. Try Monaco Editor View Lines DOM
-    const monacoLines = document.querySelectorAll(".monaco-editor .view-line");
-    if (monacoLines && monacoLines.length > 0) {
-      const lines = Array.from(monacoLines).map((l) => l.textContent || "").join("\n");
-      if (lines.trim().length > 0) {
-        return cleanCodeText(lines);
-      }
-    }
-
-    // 4. Try CodeMirror / Pre / Code tags
-    const preCode = document.querySelector("main pre, pre code, .cm-content");
-    if (preCode && preCode.textContent && preCode.textContent.trim().length > 0) {
-      return cleanCodeText(preCode.textContent);
-    }
-
-    // 5. Try main container innerText fallback
-    const mainEl = document.querySelector("main") || document.querySelector(".code-editor-wrapper")?.parentElement;
-    if (mainEl) {
-      const mainText = extractCodeFromWrapper(mainEl);
-      if (mainText && mainText.trim().length > 0) {
-        return cleanCodeText(mainText);
-      }
+    // 4. 4차: 에디터 내부 pre 태그 추출
+    const editorPre = document.querySelector(".cm-editor pre, .monaco-editor pre");
+    if (editorPre && editorPre.textContent && editorPre.textContent.trim().length > 0) {
+      return cleanCodeText(editorPre.textContent);
     }
 
     return "";
   }
 
-  // Extract clean code text from wrapper element
-  function extractCodeFromWrapper(container) {
-    // Clone container to strip out non-code headers/buttons
-    const clone = container.cloneNode(true);
-
-    // Remove buttons, toolbars, line-numbers gutters if present
-    const unwanted = clone.querySelectorAll(
-      "button, header, .line-numbers, .margin, .margin-view-overlays, svg, [data-testid='tab']"
-    );
-    unwanted.forEach((el) => el.remove());
-
-    const text = clone.innerText || clone.textContent || "";
-    return text;
-  }
-
-  // Clean code text (remove line number prefixes if mixed in)
   function cleanCodeText(raw) {
     if (!raw) return "";
     let lines = raw.split("\n");
 
-    // Remove empty trailing lines
     while (lines.length > 0 && lines[lines.length - 1].trim() === "") {
       lines.pop();
     }
@@ -594,14 +644,13 @@
     return lines.join("\n");
   }
 
-  // Request copy button interception from injected script
   function requestCopyInterceptFromInjected() {
     return new Promise((resolve) => {
       const reqId = "req_" + Math.random().toString(36).substr(2, 9);
       const timeout = setTimeout(() => {
         window.removeEventListener("message", handler);
         resolve(null);
-      }, 400);
+      }, 500);
 
       function handler(event) {
         if (event.data && event.data.type === "LCD_RESPONSE_COPY_INTERCEPT" && event.data.reqId === reqId) {
@@ -616,14 +665,13 @@
     });
   }
 
-  // Request code from injected script
   function requestActiveCodeFromInjected(filePath) {
     return new Promise((resolve) => {
       const reqId = "req_" + Math.random().toString(36).substr(2, 9);
       const timeout = setTimeout(() => {
         window.removeEventListener("message", handler);
         resolve(null);
-      }, 300);
+      }, 400);
 
       function handler(event) {
         if (event.data && event.data.type === "LCD_RESPONSE_ACTIVE_CODE" && event.data.reqId === reqId) {

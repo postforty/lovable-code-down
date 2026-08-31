@@ -10,7 +10,7 @@
 
 <p align="center">
   <img src="https://img.shields.io/badge/Manifest-V3-blue?style=flat-square" alt="Manifest V3" />
-  <img src="https://img.shields.io/badge/Version-1.1.0-brightgreen?style=flat-square" alt="Version 1.1.0" />
+  <img src="https://img.shields.io/badge/Version-1.1.3-brightgreen?style=flat-square" alt="Version 1.1.3" />
   <img src="https://img.shields.io/badge/License-MIT-orange?style=flat-square" alt="License MIT" />
   <img src="https://img.shields.io/badge/Type-Unofficial%20Tool-lightgrey?style=flat-square" alt="Unofficial Tool" />
 </p>
