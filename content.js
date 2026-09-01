@@ -403,6 +403,7 @@
     let hasOpenedNew = true;
     let pass = 0;
     const clickedFolders = new Set();
+    let pathStack = [];
 
     while (hasOpenedNew && pass < 100) {
       if (shouldAbort) break;
@@ -410,7 +411,6 @@
       hasOpenedNew = false;
 
       let visibleItems = getAllTreeElements().filter(el => el.getBoundingClientRect().height > 0);
-      let pathStack = [];
       let foundUnopenedFolder = false;
       
       for (let i = 0; i < visibleItems.length; i++) {
@@ -462,7 +462,7 @@
       if (!foundUnopenedFolder) {
          if (visibleItems.length > 0) {
              const lastItem = visibleItems[visibleItems.length - 1];
-             lastItem.scrollIntoView({ block: "start" });
+             lastItem.scrollIntoView({ block: "center" });
              await sleep(250);
              let newVisible = getAllTreeElements().filter(el => el.getBoundingClientRect().height > 0);
              if (newVisible.length > 0 && newVisible[newVisible.length - 1] !== lastItem) {
@@ -482,13 +482,13 @@
     addLog(`가상화 트리 파일 수집 시작...`, "info");
 
     let consecutiveNoNewItems = 0;
+    let pathStack = [];
 
     while (consecutiveNoNewItems < 5) {
       if (shouldAbort) break;
       
       let visibleItems = getAllTreeElements().filter(el => el.getBoundingClientRect().height > 0);
       let foundNew = false;
-      let pathStack = [];
 
       for (let i = 0; i < visibleItems.length; i++) {
         if (shouldAbort) break;
@@ -564,7 +564,7 @@
       if (!foundNew) {
          if (visibleItems.length > 0) {
              const lastItem = visibleItems[visibleItems.length - 1];
-             lastItem.scrollIntoView({ block: "start" });
+             lastItem.scrollIntoView({ block: "center" });
              await sleep(250);
          }
          consecutiveNoNewItems++;
