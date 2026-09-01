@@ -1,5 +1,5 @@
 /**
- * Lovable Code Downloader - Content Script (v1.2.0)
+ * Lovable Code Downloader - Content Script (v1.2.1)
  * Precision Virtualized Tree Crawler & Lossless Multi-Tier Code Extractor.
  */
 
@@ -7,12 +7,17 @@
   if (window.__LOVABLE_CODE_DOWNLOADER_INJECTED__) return;
   window.__LOVABLE_CODE_DOWNLOADER_INJECTED__ = true;
 
-  console.log("⚡ Lovable Code Downloader (v1.2.0) active.");
+  console.log("⚡ Lovable Code Downloader (v1.2.1) active.");
 
   let isExtracting = false;
   let shouldAbort = false;
 
   const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+
+  function normalizePath(p) {
+    if (!p || typeof p !== "string") return "";
+    return p.replace(/\\/g, "/").replace(/^(\.\/|\/)+/, "").trim();
+  }
 
   // Initialize UI
   function init() {
@@ -205,47 +210,65 @@
     addLog("Lovable 정밀 소스코드 추출 엔진 시작", "info");
 
     try {
-      let collectedFiles = {};
-
-      // 1. React State Bulk Extraction 시도 (엄격한 전체 프로젝트 검증)
-      addLog("🧠 React 내부 메모리 저장소(TanStack Query/Fiber) 검증 스캔 중...", "info");
-      const bulkFiles = await requestBulkStateExtraction();
-
-      if (bulkFiles && Object.keys(bulkFiles).length >= 6) {
-        addLog(`✨ 성공! 메모리 저장소에서 ${Object.keys(bulkFiles).length}개의 원본 코드를 즉시 추출했습니다. (무손실)`, "success");
-        collectedFiles = bulkFiles;
-      } else {
-        addLog("ℹ 파일 트리 직접 순회 및 CodeMirror 6 정밀 버퍼 추출 엔진으로 진행합니다.", "info");
-
-        // 2. Ensure Code Tab is active
-        await ensureCodeViewActive();
-
-        // 3. Step 1: Expand ALL folders
-        addLog("📁 파일 트리의 모든 폴더를 여는 중...", "info");
-        await expandAllTreeFolders();
-
-        // 4. Step 2: Collect ALL files
-        addLog("🔍 전체 파일 탐색 및 소스코드 정밀 수집 시작...", "info");
-        collectedFiles = await collectAllTreeFiles();
+      // 1. React State 사전 스캔 (메모리에 캐시된 파일 내용 확보)
+      addLog("🧠 React 내부 메모리 저장소(TanStack Query/Fiber) 사전 스캔 중...", "info");
+      const stateCache = (await requestBulkStateExtraction()) || {};
+      const cacheCount = Object.keys(stateCache).length;
+      if (cacheCount > 0) {
+        addLog(`⚡ 메모리 캐시에서 ${cacheCount}개 파일 데이터 확보 (고속 추출 활용)`, "info");
       }
+
+      // 2. Ensure Code Tab is active
+      await ensureCodeViewActive();
+
+      // 3. Step 1: Expand ALL folders in the tree
+      addLog("📁 파일 트리의 모든 폴더를 전수 순회 및 확장하는 중...", "info");
+      await expandAllTreeFolders();
 
       if (shouldAbort) {
         addLog("수집 작업이 중단되었습니다.", "warning");
         return;
       }
 
+      // 4. Step 2: Collect ALL files across the full tree hierarchy
+      addLog("🔍 전체 파일 계층 탐색 및 소스코드 정밀 수집 시작...", "info");
+      const collectedFiles = await collectAllTreeFiles(stateCache);
+
+      if (shouldAbort) {
+        addLog("수집 작업이 중단되었습니다.", "warning");
+        return;
+      }
+
+      // 5. Merge any remaining state files not traversed in DOM
+      for (const [path, content] of Object.entries(stateCache)) {
+        const cleanPath = normalizePath(path);
+        if (cleanPath && !collectedFiles[cleanPath] && content !== null && content !== undefined) {
+          collectedFiles[cleanPath] = content;
+        }
+      }
+
       const fileCount = Object.keys(collectedFiles).length;
       if (fileCount === 0) {
-        throw new Error("수집된 파일이 없습니다. 파일 목록을 다시 확인해 주세요.");
+        throw new Error("수집된 파일이 없습니다. 파일 트리가 화면에 보이는지 확인해 주세요.");
       }
 
       addLog(`✨ 총 ${fileCount}개 파일 수집 완료! ZIP 압축 생성 중...`, "success");
       updateProgress(95, "", "ZIP 파일 패키징 중...");
 
-      // Generate ZIP
+      // Generate ZIP with normalized relative paths
       const zip = new JSZip();
       for (const [path, content] of Object.entries(collectedFiles)) {
-        zip.file(path, content);
+        const cleanPath = normalizePath(path);
+        if (!cleanPath) continue;
+
+        if (content instanceof Blob || content instanceof ArrayBuffer || content instanceof Uint8Array) {
+          zip.file(cleanPath, content);
+        } else if (typeof content === "string" && content.startsWith("data:") && content.includes(";base64,")) {
+          const base64Data = content.split(";base64,")[1];
+          zip.file(cleanPath, base64Data, { base64: true });
+        } else {
+          zip.file(cleanPath, String(content));
+        }
       }
 
       const projectName = getProjectName();
@@ -270,7 +293,7 @@
       }, 3000);
 
       updateProgress(100, fileName, "다운로드 완료!");
-      addLog(`🎉 성공: '${fileName}' (${Math.round(zipBlob.size / 1024)} KB) 다운로드가 완료되었습니다!`, "success");
+      addLog(`🎉 성공: '${fileName}' (${Math.round(zipBlob.size / 1024)} KB, ${fileCount}개 파일) 다운로드가 완료되었습니다!`, "success");
       showToast(`🎉 '${fileName}' 다운로드가 시작되었습니다!`);
     } catch (err) {
       console.error("[Lovable Code Downloader]", err);
@@ -289,7 +312,7 @@
       const timeout = setTimeout(() => {
         window.removeEventListener("message", handler);
         resolve(null);
-      }, 1500);
+      }, 1200);
 
       function handler(event) {
         if (event.data && event.data.type === "LCD_RESPONSE_STATE_EXTRACTION") {
@@ -327,166 +350,218 @@
 
   // Find the virtual scroll container for the tree
   function getTreeScrollContainer() {
-    const treeItems = document.querySelectorAll("[role='treeitem'], [role='tree'] button, div[role='tree'] [tabindex]");
+    const treeItems = document.querySelectorAll(
+      "[role='treeitem'], [role='tree'] button, div[role='tree'] [tabindex], [data-testid*='file-tree']"
+    );
     if (treeItems.length > 0) {
       let el = treeItems[0].parentElement;
-      while (el && el !== document.body) {
+      while (el && el !== document.body && el !== document.documentElement) {
         const style = window.getComputedStyle(el);
         const overflowY = style.overflowY;
         const isScrollable =
-          (overflowY === "auto" || overflowY === "scroll" || overflowY === "overlay") &&
-          el.scrollHeight > el.clientHeight;
-
-        if (
-          isScrollable ||
+          overflowY === "auto" ||
+          overflowY === "scroll" ||
+          overflowY === "overlay" ||
           el.hasAttribute("data-radix-scroll-area-viewport") ||
-          el.classList.contains("overflow-y-auto")
-        ) {
+          el.classList.contains("overflow-y-auto");
+
+        if (isScrollable) {
           return el;
         }
         el = el.parentElement;
       }
     }
 
-    const radixViewport = document.querySelector("[data-radix-scroll-area-viewport], .overflow-y-auto");
+    const radixViewport = document.querySelector(
+      "aside [data-radix-scroll-area-viewport], [data-panel] [data-radix-scroll-area-viewport], [data-radix-scroll-area-viewport], aside .overflow-y-auto, [role='tree']"
+    );
     if (radixViewport) return radixViewport;
 
     return null;
   }
 
-  // Find all visible tree items across document and Shadow DOMs
+  // Find all visible tree items across document and Shadow DOMs with robust deduplication
   function getAllTreeElements() {
-    const items = [];
-
-    // Check standard tree items and buttons
     const queried = document.querySelectorAll(
-      "[role='treeitem'], [role='tree'] button, div[role='tree'] [role='button'], [data-item-type]"
+      "[role='treeitem'], [role='tree'] button, div[role='tree'] [role='button'], [data-item-type], [data-testid*='file-item'], [data-testid*='file-tree'] button, [data-path]"
     );
+
+    const rawElements = [];
     queried.forEach((el) => {
       if (el.offsetParent !== null || el.getBoundingClientRect().height > 0) {
-        items.push(el);
+        // Discard action / options / menu popup buttons that are inside a treeitem row
+        const ariaLabel = (el.getAttribute("aria-label") || el.getAttribute("title") || "").toLowerCase();
+        if (
+          ariaLabel.includes("more action") ||
+          ariaLabel.includes("more option") ||
+          ariaLabel === "options" ||
+          ariaLabel === "horizontal"
+        ) {
+          return;
+        }
+        rawElements.push(el);
       }
     });
 
-    // Check custom element shadowRoot if present
-    const customTree = document.querySelector("file-tree-container");
-    if (customTree && customTree.shadowRoot) {
-      customTree.shadowRoot
-        .querySelectorAll("[role='treeitem'], button[data-item-type]")
-        .forEach((el) => {
-          if (el.getBoundingClientRect().height > 0) items.push(el);
-        });
-    }
+    // Check potential shadow DOM hosts (custom elements, sidebars, tree containers)
+    const potentialShadowHosts = document.querySelectorAll(
+      "file-tree-container, [data-testid*='tree'], [class*='tree'], aside, [data-panel]"
+    );
+    potentialShadowHosts.forEach((host) => {
+      if (host && host.shadowRoot) {
+        host.shadowRoot
+          .querySelectorAll("[role='treeitem'], button, [data-item-type], [role='button'], [data-path]")
+          .forEach((el) => {
+            if (el.getBoundingClientRect().height > 0) {
+              const ariaLabel = (el.getAttribute("aria-label") || el.getAttribute("title") || "").toLowerCase();
+              if (
+                ariaLabel.includes("more action") ||
+                ariaLabel.includes("more option") ||
+                ariaLabel === "options" ||
+                ariaLabel === "horizontal"
+              ) {
+                return;
+              }
+              rawElements.push(el);
+            }
+          });
+      }
+    });
 
-    return items;
-  }
+    // Group items by vertical Y coordinate (same visual row in virtual tree)
+    const rowMap = new Map();
 
-  // Accurate Tree Item Classifier (distinguish folders vs files without extension bias)
-  function classifyTreeItem(el, label) {
-    if (!label) return { isFolder: false, isOpen: false };
+    for (const el of rawElements) {
+      const rect = el.getBoundingClientRect();
+      const y = Math.round(rect.top);
+      if (rect.height <= 0 || rect.width <= 0) continue;
 
-    // 1. Explicit aria-expanded
-    const ariaExpanded = el.getAttribute("aria-expanded");
-    if (ariaExpanded === "true") return { isFolder: true, isOpen: true };
-    if (ariaExpanded === "false") return { isFolder: true, isOpen: false };
-
-    // 2. Explicit data-state
-    const dataState = el.getAttribute("data-state");
-    if (dataState === "open") return { isFolder: true, isOpen: true };
-    if (dataState === "closed") return { isFolder: true, isOpen: false };
-
-    // 3. Explicit data-item-type
-    const itemType = el.getAttribute("data-item-type");
-    if (itemType === "folder") return { isFolder: true, isOpen: false };
-    if (itemType === "file") return { isFolder: false, isOpen: false };
-
-    // 4. SVG icon inspection (Chevron, Folder icons)
-    const svgs = el.querySelectorAll("svg");
-    let hasChevron = false;
-    let isChevronOpen = false;
-    let hasFolderIcon = false;
-
-    for (const svg of svgs) {
-      const cls = (svg.getAttribute("class") || "") + " " + (svg.className || "");
-      const html = svg.innerHTML || "";
-
-      // Check chevron SVGs
-      if (
-        cls.includes("chevron") ||
-        cls.includes("lucide-chevron") ||
-        html.includes("6 9 12 15 18 9") ||
-        html.includes("9 18 15 12 9 6") ||
-        html.includes("m9 18 6-6-6-6") ||
-        html.includes("m6 9 6 6 6-6")
-      ) {
-        hasChevron = true;
-        // Expanded chevron is typically rotated or points down (m6 9 6 6 6-6 / 6 9 12 15 18 9)
-        if (
-          cls.includes("rotate-90") ||
-          cls.includes("rotate-180") ||
-          html.includes("6 9 12 15 18 9") ||
-          html.includes("m6 9 6 6 6-6")
-        ) {
-          isChevronOpen = true;
+      let matchedY = null;
+      for (const existingY of rowMap.keys()) {
+        if (Math.abs(existingY - y) < 4) {
+          matchedY = existingY;
+          break;
         }
       }
 
-      // Check folder SVGs
-      if (
-        cls.includes("folder") ||
-        html.includes("M4 20h16") ||
-        html.includes("M22 19a2 2 0 0 1-2 2H4") ||
-        html.includes("M20 20a2 2 0 0 0 2-2V8")
-      ) {
-        hasFolderIcon = true;
+      if (matchedY !== null) {
+        // Replace current candidate if el is more specific (e.g. has role='treeitem' or data-path)
+        const current = rowMap.get(matchedY);
+        const elIsTreeItem = el.hasAttribute("role") && el.getAttribute("role") === "treeitem";
+        const elHasPath = el.hasAttribute("data-path") || el.hasAttribute("data-filename") || el.hasAttribute("aria-expanded");
+        const currIsTreeItem = current.hasAttribute("role") && current.getAttribute("role") === "treeitem";
+        const currHasPath = current.hasAttribute("data-path") || current.hasAttribute("data-filename") || current.hasAttribute("aria-expanded");
+
+        if ((elIsTreeItem || elHasPath) && (!currIsTreeItem && !currHasPath)) {
+          rowMap.set(matchedY, el);
+        }
+      } else {
+        rowMap.set(y, el);
       }
     }
 
-    if (hasChevron || hasFolderIcon) {
-      return { isFolder: true, isOpen: isChevronOpen };
-    }
+    const uniqueItems = Array.from(rowMap.values());
 
-    // 5. Special extensionless files
-    const knownExactFiles = [
-      "Dockerfile", "LICENSE", "Makefile", "CNAME", "Procfile",
-      ".gitignore", ".prettierrc", ".eslintrc", ".env", ".env.local",
-      ".env.example", ".env.production", ".npmrc", "robots.txt"
-    ];
-    if (knownExactFiles.includes(label)) {
-      return { isFolder: false, isOpen: false };
-    }
+    // Sort strictly in document top-to-bottom order
+    uniqueItems.sort((a, b) => a.getBoundingClientRect().top - b.getBoundingClientRect().top);
 
-    // 6. Has extension check
-    const hasExtension = /\.[a-zA-Z0-9_-]+$/.test(label);
-    if (hasExtension) {
-      return { isFolder: false, isOpen: false };
-    }
-
-    // 7. Fallback: names without extension are considered folders
-    return { isFolder: true, isOpen: false };
+    return uniqueItems;
   }
 
+  // Item label extractor
   function getLabel(btn) {
-    let label = btn.getAttribute("aria-label") || "";
+    const treeItem = btn.closest("[role='treeitem'], [data-path], [data-filename], [data-name]") || btn;
+
+    const directName =
+      treeItem.getAttribute("data-filename") ||
+      treeItem.getAttribute("data-name") ||
+      btn.getAttribute("data-filename") ||
+      btn.getAttribute("data-name");
+    if (directName) return directName.trim();
+
+    const dataPath = treeItem.getAttribute("data-path") || btn.getAttribute("data-path");
+    if (dataPath) {
+      const cleanPath = dataPath.replace(/\\/g, "/").replace(/\/+$/, "");
+      const parts = cleanPath.split("/");
+      if (parts.length > 0 && parts[parts.length - 1].trim().length > 0) {
+        return parts[parts.length - 1].trim();
+      }
+    }
+
+    let label = btn.getAttribute("aria-label") || treeItem.getAttribute("aria-label") || "";
+    if (!label || label === "Options" || label === "More actions" || label === "horizontal") {
+      const textEls = btn.querySelectorAll("span, p, div");
+      for (const t of textEls) {
+        if (t.children.length === 0 && t.textContent && t.textContent.trim().length > 0) {
+          const txt = t.textContent.trim();
+          if (txt !== "Options" && txt !== "horizontal" && !/^\d+$/.test(txt)) {
+            label = txt;
+            break;
+          }
+        }
+      }
+    }
+
     if (!label) {
       label = btn.innerText || btn.textContent || "";
       label = label.split("\n")[0].trim();
     }
-    // Clean up count badges or option buttons
+
+    // Clean up count badges (e.g. "src (12)" -> "src")
     label = label.replace(/\s*\(\d+\)$/, "").trim();
     return label;
   }
 
+  // Item depth level calculation
   function getItemLevel(btn) {
-    const ariaLevel = btn.getAttribute("aria-level");
-    if (ariaLevel) return parseInt(ariaLevel, 10);
+    const treeItem = btn.closest("[role='treeitem'], [data-depth], [data-level], [aria-level]") || btn;
 
-    const dataDepth = btn.getAttribute("data-depth") || btn.getAttribute("data-level");
-    if (dataDepth) return parseInt(dataDepth, 10);
+    // 1. WAI-ARIA standard aria-level
+    const ariaLevel = treeItem.getAttribute("aria-level") || btn.getAttribute("aria-level");
+    if (ariaLevel) {
+      return parseInt(ariaLevel, 10);
+    }
 
-    const style = window.getComputedStyle(btn);
-    const pl = parseFloat(style.paddingLeft) || 0;
-    const ml = parseFloat(style.marginLeft) || 0;
+    // 2. data-depth or data-level
+    const dataDepth =
+      treeItem.getAttribute("data-depth") ||
+      treeItem.getAttribute("data-level") ||
+      btn.getAttribute("data-depth") ||
+      btn.getAttribute("data-level");
+    if (dataDepth !== null && dataDepth !== undefined) {
+      return parseInt(dataDepth, 10);
+    }
+
+    // 3. CSS variables --depth, --level, --indent, --tree-depth
+    const styleAttr = (treeItem.getAttribute("style") || "") + " " + (btn.getAttribute("style") || "");
+    const depthMatch = styleAttr.match(/--(?:depth|level|indent|tree-depth|item-depth):\s*(\d+)/i);
+    if (depthMatch) {
+      return parseInt(depthMatch[1], 10);
+    }
+
+    // 4. Inline style padding-left or margin-left (e.g. padding-left: 24px or 1.5rem)
+    const plInlineMatch = styleAttr.match(/padding-left:\s*([\d.]+)px/i);
+    if (plInlineMatch) {
+      return Math.max(0, Math.round(parseFloat(plInlineMatch[1]) / 12));
+    }
+    const plRemMatch = styleAttr.match(/padding-left:\s*([\d.]+)rem/i);
+    if (plRemMatch) {
+      return Math.max(0, Math.round((parseFloat(plRemMatch[1]) * 16) / 12));
+    }
+
+    // 5. Tailwind class inspection (e.g. pl-2, pl-4, pl-6, pl-8, ml-2...)
+    const classNames = (treeItem.className || "") + " " + (btn.className || "");
+    const plMatch = classNames.match(/(?:pl|ml|indent)-(\d+)/);
+    if (plMatch) {
+      const units = parseInt(plMatch[1], 10);
+      return Math.max(0, Math.round(units / 2));
+    }
+
+    // 6. Computed paddingLeft/marginLeft and visual offset
+    const computedItemStyle = window.getComputedStyle(treeItem);
+    const computedBtnStyle = window.getComputedStyle(btn);
+    const pl = (parseFloat(computedItemStyle.paddingLeft) || 0) + (parseFloat(computedBtnStyle.paddingLeft) || 0);
+    const ml = (parseFloat(computedItemStyle.marginLeft) || 0) + (parseFloat(computedBtnStyle.marginLeft) || 0);
 
     const rect = btn.getBoundingClientRect();
     const walker = document.createTreeWalker(btn, NodeFilter.SHOW_TEXT, null, false);
@@ -503,14 +578,178 @@
     return Math.max(0, Math.round(totalOffset / 12));
   }
 
+  // Accurate Tree Item Classifier (distinguishes folders vs extensionless files vs dot-folders)
+  function classifyTreeItem(el, label) {
+    if (!label) return { isFolder: false, isOpen: false };
+
+    const treeItem = (el && typeof el.closest === "function")
+      ? (el.closest("[role='treeitem'], [data-state], [aria-expanded], [data-item-type]") || el)
+      : (el || null);
+
+    // 1. Explicit aria-expanded (W3C standard for tree folders)
+    const ariaExpanded = (el && el.getAttribute ? el.getAttribute("aria-expanded") : null) ||
+                         (treeItem && treeItem.getAttribute ? treeItem.getAttribute("aria-expanded") : null);
+    if (ariaExpanded === "true") return { isFolder: true, isOpen: true };
+    if (ariaExpanded === "false") return { isFolder: true, isOpen: false };
+
+    // 2. Explicit data-state (Radix Collapsible / Tree standard)
+    const dataState = (el && el.getAttribute ? el.getAttribute("data-state") : null) ||
+                      (treeItem && treeItem.getAttribute ? treeItem.getAttribute("data-state") : null);
+    if (dataState === "open") return { isFolder: true, isOpen: true };
+    if (dataState === "closed") return { isFolder: true, isOpen: false };
+
+    // 3. Explicit data-item-type / data-type
+    const itemType =
+      (el && el.getAttribute ? el.getAttribute("data-item-type") || el.getAttribute("data-type") : null) ||
+      (treeItem && treeItem.getAttribute ? treeItem.getAttribute("data-item-type") || treeItem.getAttribute("data-type") : null);
+    if (itemType === "folder" || itemType === "directory") {
+      return { isFolder: true, isOpen: isElementVisuallyExpanded(el, treeItem) };
+    }
+    if (itemType === "file") return { isFolder: false, isOpen: false };
+
+    // 4. SVG icon inspection (Chevron, Folder vs File icons)
+    const svgs = (treeItem && treeItem.querySelectorAll ? treeItem.querySelectorAll("svg") : []) ||
+                 (el && el.querySelectorAll ? el.querySelectorAll("svg") : []);
+    let hasChevron = false;
+    let isChevronOpen = false;
+    let hasFolderIcon = false;
+
+    for (const svg of svgs) {
+      const cls = (svg.getAttribute && svg.getAttribute("class") || "") + " " + (svg.className?.baseVal || svg.className || "");
+      const html = svg.innerHTML || "";
+
+      // Chevron detection
+      if (
+        cls.includes("chevron") ||
+        cls.includes("lucide-chevron") ||
+        html.includes("6 9 12 15 18 9") ||
+        html.includes("9 18 15 12 9 6") ||
+        html.includes("m9 18 6-6-6-6") ||
+        html.includes("m6 9 6 6 6-6") ||
+        html.includes("M9 18L15 12L9 6") ||
+        html.includes("M6 9L12 15L18 9")
+      ) {
+        hasChevron = true;
+        if (
+          cls.includes("rotate-90") ||
+          cls.includes("rotate-180") ||
+          cls.includes("open") ||
+          html.includes("6 9 12 15 18 9") ||
+          html.includes("m6 9 6 6 6-6") ||
+          html.includes("M6 9L12 15L18 9")
+        ) {
+          isChevronOpen = true;
+        }
+      }
+
+      // Folder icon detection
+      if (
+        cls.includes("folder") ||
+        cls.includes("lucide-folder") ||
+        html.includes("M4 20h16") ||
+        html.includes("M22 19a2 2 0 0 1-2 2H4") ||
+        html.includes("M20 20a2 2 0 0 0 2-2V8")
+      ) {
+        hasFolderIcon = true;
+        if (cls.includes("folder-open") || cls.includes("lucide-folder-open")) {
+          isChevronOpen = true;
+        }
+      }
+    }
+
+    if (hasChevron || hasFolderIcon) {
+      return { isFolder: true, isOpen: isChevronOpen };
+    }
+
+    // 5. Special exact files (extensionless or multi-part dotfiles or cloud configs)
+    const knownExactFiles = new Set([
+      "Dockerfile", "Dockerfile.dev", "Dockerfile.prod", "Dockerfile.local", "Containerfile",
+      "LICENSE", "LICENCE", "LICENSE-MIT", "LICENSE-APACHE", "LICENSE-2.0", "LICENSE.md", "LICENSE.txt",
+      "UNLICENSE", "COPYING", "AUTHORS", "CONTRIBUTING", "CONTRIBUTING.md", "CHANGELOG", "CHANGELOG.md",
+      "CODE_OF_CONDUCT", "CODE_OF_CONDUCT.md", "SECURITY", "SECURITY.md", "Makefile", "CNAME",
+      "Procfile", "Gemfile", "Rakefile", "Brewfile", "README", "README.md", "_headers", "_redirects",
+      ".gitignore", ".npmignore", ".prettierignore", ".eslintignore", ".editorconfig",
+      ".env", ".env.local", ".env.development", ".env.production", ".env.test",
+      ".env.example", ".env.sample", ".env.staging", ".env.preview", ".env.test.local",
+      ".env.development.local", ".env.production.local", ".npmrc", ".nvmrc",
+      ".node-version", ".tool-versions", ".yarnrc", ".yarnrc.yml", ".yarnrc.yaml",
+      "robots.txt", "humans.txt", "browserslist", ".babelrc", ".gitattributes", ".gitmodules",
+      ".dockerignore", ".gitkeep", ".stylelintrc", ".stylelintignore", ".postcssrc",
+      ".browserslistrc", ".lintstagedrc", ".eslintrc", ".prettierrc", ".commitlintrc",
+      "bun.lock", "bun.lockb", "pnpm-lock.yaml", "package-lock.json", "yarn.lock",
+      "Cargo.lock", "Cargo.toml", "go.mod", "go.sum", "composer.lock", "composer.json",
+      "Pipfile", "Pipfile.lock", "pyproject.toml", "requirements.txt",
+      ".cursorrules", ".watchmanconfig", ".solhintignore", ".vercelignore", ".swcrc", ".releaserc"
+    ]);
+    if (knownExactFiles.has(label)) {
+      return { isFolder: false, isOpen: false };
+    }
+
+    // 6. Dot-folders (strictly directories)
+    const knownDotFolders = new Set([
+      ".lovable", ".github", ".vscode", ".husky", ".git", ".next", ".circleci",
+      ".devcontainer", ".cursor", ".idea", ".agents", ".agent", ".claude",
+      ".changeset", ".storybook", ".turbo", ".wrangler", ".expo", ".output",
+      ".contentlayer", ".docusaurus", ".yarn", ".nuxt", ".svelte-kit", ".vercel", ".netlify"
+    ]);
+    if (knownDotFolders.has(label)) {
+      return { isFolder: true, isOpen: isChevronOpen };
+    }
+
+    // 7. Standard file extension check (e.g. accordion.tsx, vite.config.ts, project.json, vite-env.d.ts)
+    const lastDot = label.lastIndexOf(".");
+    if (lastDot > 0) {
+      const ext = label.slice(lastDot + 1).toLowerCase();
+      const knownExtensions = new Set([
+        "ts", "tsx", "js", "jsx", "mjs", "cjs", "mts", "cts", "json", "json5", "jsonc",
+        "css", "scss", "sass", "less", "html", "htm", "md", "mdx", "txt", "yaml", "yml",
+        "toml", "xml", "svg", "png", "jpg", "jpeg", "gif", "ico", "webp", "bmp", "tiff",
+        "woff", "woff2", "ttf", "eot", "otf", "map", "lock", "lockb", "env", "config",
+        "wasm", "sh", "bash", "sql", "prisma", "graphql", "gql", "astro", "svelte", "vue"
+      ]);
+      if (knownExtensions.has(ext) || /^[a-z0-9]{1,12}$/i.test(ext)) {
+        return { isFolder: false, isOpen: false };
+      }
+    }
+
+    // 8. Other dot-prefixed names not in knownDotFolders default to files
+    if (label.startsWith(".")) {
+      return { isFolder: false, isOpen: false };
+    }
+
+    // 9. Fallback: names without extension are treated as folders
+    return { isFolder: true, isOpen: isChevronOpen };
+  }
+
+  function isElementVisuallyExpanded(el, treeItem) {
+    const container = treeItem || el;
+    if (!container || !container.querySelectorAll) return false;
+    const svgs = container.querySelectorAll("svg");
+    for (const svg of svgs) {
+      const cls = (svg.getAttribute("class") || "") + " " + (svg.className?.baseVal || svg.className || "");
+      const html = svg.innerHTML || "";
+      if (
+        cls.includes("rotate-90") ||
+        cls.includes("rotate-180") ||
+        cls.includes("open") ||
+        cls.includes("folder-open") ||
+        html.includes("6 9 12 15 18 9") ||
+        html.includes("m6 9 6 6 6-6") ||
+        html.includes("M6 9L12 15L18 9")
+      ) {
+        return true;
+      }
+    }
+    return false;
+  }
+
   // Deterministically expand ALL closed folders across the virtual tree
   async function expandAllTreeFolders() {
     const container = getTreeScrollContainer();
-    const clickedFolderKeys = new Set();
-
-    let maxPasses = 30;
+    const maxPasses = 8;
     let pass = 0;
     let hasOpenedInPass = true;
+    const expandedSet = new Set();
 
     while (hasOpenedInPass && pass < maxPasses) {
       if (shouldAbort) break;
@@ -524,9 +763,10 @@
 
       let currentScroll = 0;
       const maxScroll = container ? Math.max(container.scrollHeight, 1000) : 1000;
-      const scrollStep = container ? Math.max(120, Math.floor(container.clientHeight * 0.6)) : 200;
+      const scrollStep = container ? Math.max(80, Math.floor(container.clientHeight * 0.5)) : 160;
+      let pathStack = [];
 
-      while (currentScroll <= maxScroll) {
+      while (currentScroll <= maxScroll + 200) {
         if (shouldAbort) break;
 
         if (container) {
@@ -540,26 +780,38 @@
 
           const btn = visibleItems[i];
           const label = getLabel(btn);
-          if (!label || label === "Options" || label === "horizontal") continue;
+          if (!label || label === "Options" || label === "horizontal" || label === "More actions") continue;
 
+          const level = getItemLevel(btn);
           const { isFolder, isOpen } = classifyTreeItem(btn, label);
 
-          if (isFolder && !isOpen) {
-            const level = getItemLevel(btn);
-            const folderKey = `${level}_${label}`;
+          // Adjust path stack based on indentation level
+          while (pathStack.length > 0 && pathStack[pathStack.length - 1].level >= level) {
+            pathStack.pop();
+          }
 
-            if (!clickedFolderKeys.has(folderKey)) {
-              clickedFolderKeys.add(folderKey);
-              addLog(`📂 폴더 확장: ${label}`, "info");
+          const parentFolder = pathStack.map((p) => p.name).join("/");
+          const explicitPath = (btn.closest("[data-path]") || btn).getAttribute("data-path");
+          const folderFullPath = normalizePath(explicitPath || (parentFolder ? `${parentFolder}/${label}` : label));
 
-              btn.scrollIntoView({ block: "nearest" });
-              const chevronOrSvg = btn.querySelector("svg");
-              if (chevronOrSvg) {
-                chevronOrSvg.dispatchEvent(new MouseEvent("click", { bubbles: true, cancelable: true }));
+          if (isFolder) {
+            pathStack.push({ level: level, name: label });
+
+            if (!isOpen) {
+              if (expandedSet.has(folderFullPath)) {
+                continue;
               }
-              btn.click();
 
+              addLog(`📂 폴더 확장: ${folderFullPath}`, "info");
+
+              // Single deterministic click to toggle folder open (avoid action/more buttons)
+              const trigger =
+                btn.querySelector("[aria-expanded], [data-state], button:not([aria-label*='more' i]):not([aria-label*='action' i]):not([aria-label*='option' i])") ||
+                btn;
+              trigger.click();
               await sleep(200);
+
+              expandedSet.add(folderFullPath);
               hasOpenedInPass = true;
             }
           }
@@ -577,7 +829,7 @@
   }
 
   // Deterministically collect all files with monotonic top-to-bottom virtual scroll
-  async function collectAllTreeFiles() {
+  async function collectAllTreeFiles(stateCache = {}) {
     const files = {};
     const processedPaths = new Set();
     const container = getTreeScrollContainer();
@@ -591,16 +843,15 @@
 
     let currentScroll = 0;
     const maxScroll = container ? Math.max(container.scrollHeight, 2000) : 2000;
-    const scrollStep = container ? Math.max(80, Math.floor(container.clientHeight * 0.45)) : 150;
+    const scrollStep = container ? Math.max(60, Math.floor(container.clientHeight * 0.4)) : 120;
     let pathStack = [];
 
-    // Continuous monotonic scroll pass
     while (currentScroll <= maxScroll + 500) {
       if (shouldAbort) break;
 
       if (container) {
         container.scrollTop = currentScroll;
-        await sleep(90);
+        await sleep(80);
       }
 
       const visibleItems = getAllTreeElements();
@@ -610,7 +861,7 @@
 
         const btn = visibleItems[i];
         const label = getLabel(btn);
-        if (!label || label === "Options" || label === "horizontal") continue;
+        if (!label || label === "Options" || label === "horizontal" || label === "More actions") continue;
 
         const level = getItemLevel(btn);
         const { isFolder } = classifyTreeItem(btn, label);
@@ -625,9 +876,12 @@
           continue;
         }
 
-        // Construct full path
+        // It is a file: construct full relative path
+        const explicitPath = (btn.closest("[data-path], [data-filepath], [data-treepath], [data-file-path], [data-full-path]") || btn).getAttribute("data-path") ||
+                             (btn.closest("[data-filepath]") || btn).getAttribute("data-filepath") ||
+                             (btn.closest("[data-treepath]") || btn).getAttribute("data-treepath");
         const folderPath = pathStack.map((p) => p.name).join("/");
-        const fullPath = folderPath ? `${folderPath}/${label}` : label;
+        const fullPath = normalizePath(explicitPath || (folderPath ? `${folderPath}/${label}` : label));
 
         if (processedPaths.has(fullPath)) continue;
         processedPaths.add(fullPath);
@@ -638,6 +892,23 @@
           `파일 수집 중 (${processedPaths.size}개 완료)`
         );
 
+        // Check if pre-cached in React state (safe matching by exact path or root file)
+        const cachedCode =
+          stateCache[fullPath] !== undefined
+            ? stateCache[fullPath]
+            : stateCache[`/${fullPath}`] !== undefined
+            ? stateCache[`/${fullPath}`]
+            : pathStack.length === 0 && stateCache[label] !== undefined
+            ? stateCache[label]
+            : undefined;
+
+        if (cachedCode !== undefined && cachedCode !== null) {
+          files[fullPath] = cachedCode;
+          const previewSnippet = typeof cachedCode === "string" ? cachedCode.replace(/\s+/g, " ").slice(0, 35) : "asset";
+          addLog(`✔ [캐시] ${fullPath} [${previewSnippet}...]`, "info");
+          continue;
+        }
+
         // Open file in editor
         btn.scrollIntoView({ block: "nearest" });
         btn.click();
@@ -646,17 +917,21 @@
         await waitForEditorToLoadFile(fullPath, label);
 
         try {
-          const isImage = /\.(jpg|jpeg|png|webp|gif|ico|svg)$/i.test(fullPath);
-          if (isImage) {
-            const imgContent = await tryGetImageContent();
-            files[fullPath] = imgContent || "// Image asset";
-            addLog(`✔ [이미지] ${fullPath}`, "info");
+          const isBinaryAsset = /\.(jpg|jpeg|png|webp|gif|ico|bmp|woff|woff2|ttf|eot)$/i.test(fullPath);
+          if (isBinaryAsset) {
+            const imgContent = await tryGetImageContent(fullPath);
+            files[fullPath] = imgContent || "// Asset: " + fullPath;
+            addLog(`✔ [에셋] ${fullPath}`, "info");
           } else {
             const content = await getEditorContentRobust(fullPath, label);
-            if (content !== null && content !== undefined) {
+            if (content !== null && content !== undefined && (content.length > 0 || !fullPath.endsWith(".svg"))) {
               files[fullPath] = content;
               const previewSnippet = content.replace(/\s+/g, " ").slice(0, 35);
               addLog(`✔ ${fullPath} (${content.length} B) [${previewSnippet}...]`, "info");
+            } else if (fullPath.endsWith(".svg")) {
+              const svgContent = await tryGetImageContent(fullPath);
+              files[fullPath] = svgContent || content || "";
+              addLog(`✔ [에셋-SVG] ${fullPath}`, "info");
             } else {
               addLog(`⚠ ${fullPath} 빈 내용 또는 접근 불가`, "warning");
               files[fullPath] = "";
@@ -669,7 +944,7 @@
       }
 
       currentScroll += scrollStep;
-      if (container && currentScroll > container.scrollHeight) {
+      if (container && currentScroll > container.scrollHeight + 100) {
         break;
       }
     }
@@ -680,23 +955,36 @@
   // Wait for the editor to reflect the clicked file before extracting code (eliminates race condition)
   async function waitForEditorToLoadFile(targetPath, fileName, maxWaitMs = 1200) {
     const start = Date.now();
+    const pathParts = targetPath.split("/").filter(Boolean);
+    const parentName = pathParts.length > 1 ? pathParts[pathParts.length - 2] : null;
+
     while (Date.now() - start < maxWaitMs) {
       // 1. Query injected active editor info
       const activeInfo = await requestActiveFileInfoFromInjected();
       if (activeInfo) {
         const { breadcrumb, activeTab } = activeInfo;
-        if (
-          (activeTab && (activeTab === fileName || activeTab.endsWith(fileName))) ||
-          (breadcrumb && (breadcrumb.includes(fileName) || breadcrumb.includes(targetPath)))
-        ) {
+        const matchesTab = activeTab && (activeTab === fileName || activeTab.endsWith(fileName));
+        const matchesBreadcrumb = breadcrumb && (breadcrumb.includes(fileName) || breadcrumb.includes(targetPath));
+
+        if (matchesBreadcrumb) {
           await sleep(60); // Allow CodeMirror doc to finalize
           return true;
+        }
+
+        if (matchesTab) {
+          // If the file is in a subfolder and we have a breadcrumb, ensure breadcrumb matches parent folder
+          if (parentName && breadcrumb && !breadcrumb.includes(parentName)) {
+            // Still displaying old tab with same fileName from another folder
+          } else {
+            await sleep(60);
+            return true;
+          }
         }
       }
 
       // 2. Direct DOM check for active tab
       const tab = document.querySelector(
-        "[role='tab'][aria-selected='true'], [role='tab'][data-state='active'], [role='tab'].active"
+        "[role='tab'][aria-selected='true'], [role='tab'][data-state='active'], [role='tab'].active, .tab-active"
       );
       if (tab) {
         const tabText = tab.textContent?.trim() || "";
@@ -711,10 +999,11 @@
     return false;
   }
 
-  // Handle image assets
-  async function tryGetImageContent() {
+  // Handle image and binary assets
+  async function tryGetImageContent(fullPath) {
+    // Check main image viewers
     const imgEl = document.querySelector(
-      "main img, .code-viewer img, img[src*='blob:'], img[src*='http']"
+      "main img, .code-viewer img, img[src*='blob:'], img[src*='http'], [data-panel] img"
     );
     if (imgEl && imgEl.src) {
       try {
@@ -722,6 +1011,13 @@
         return await res.blob();
       } catch (_) {}
     }
+
+    // Check SVG element
+    const svgEl = document.querySelector("main .code-viewer svg, [data-panel] svg");
+    if (svgEl && fullPath.endsWith(".svg")) {
+      return svgEl.outerHTML;
+    }
+
     return null;
   }
 

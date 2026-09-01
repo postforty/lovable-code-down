@@ -1,16 +1,16 @@
 /**
- * Lovable Code Downloader - Injected Script (v1.2.0, Main World Context)
+ * Lovable Code Downloader - Injected Script (v1.2.1, Main World Context)
  * 1. Hooks navigator.clipboard & copy event to intercept editor's "Copy file content" button.
  * 2. Scans CodeMirror 6 / Monaco Editor state buffers directly (100% loss-free).
  * 3. Provides real-time active editor state queries (breadcrumb, tab, CM6 buffer) for sync verification.
- * 4. Strictly validates React Query / TanStack Query cache for full project files.
+ * 4. Extracts full/partial project files from React Query / TanStack Query cache & React Fiber.
  */
 
 (function () {
   if (window.__LOVABLE_INJECTED_READY__) return;
   window.__LOVABLE_INJECTED_READY__ = true;
 
-  console.log("⚡ Lovable Injected Script (v1.2.0) active in Main World.");
+  console.log("⚡ Lovable Injected Script (v1.2.1) active in Main World.");
 
   let latestDownloadedText = null;
   let latestDownloadedBlob = null;
@@ -75,9 +75,9 @@
 
     for (const container of editorContainers) {
       let headerArea = container.parentElement;
-      for (let i = 0; i < 4 && headerArea; i++) {
+      for (let i = 0; i < 5 && headerArea; i++) {
         const copyBtn = headerArea.querySelector(
-          "button[aria-label*='Copy file'], button[aria-label*='Copy code'], button[title*='Copy file'], button[title*='Copy code'], button[aria-label='Copy file content']"
+          "button[aria-label*='Copy'], button[aria-label*='copy'], button[title*='Copy'], button[title*='copy'], button[aria-label*='복사'], button[title*='복사']"
         );
         if (copyBtn) return copyBtn;
         headerArea = headerArea.parentElement;
@@ -86,18 +86,18 @@
 
     // 2. Check main code panel area (excluding chat panels)
     const codePanels = document.querySelectorAll(
-      "main [data-panel-group] [data-panel]:last-child, .code-editor-wrapper, [data-radix-scroll-area-viewport] ~ div"
+      "main [data-panel-group] [data-panel]:last-child, .code-editor-wrapper, [data-radix-scroll-area-viewport] ~ div, [data-panel-id*='editor']"
     );
     for (const panel of codePanels) {
       const copyBtn = panel.querySelector(
-        "button[aria-label*='Copy file'], button[aria-label*='Copy code'], button[title*='Copy file'], button[title*='Copy code']"
+        "button[aria-label*='Copy'], button[aria-label*='copy'], button[title*='Copy'], button[title*='copy'], button[aria-label*='복사'], button[title*='복사']"
       );
       if (copyBtn) return copyBtn;
     }
 
-    // 3. Document-wide query strictly for file-copy specific labels (NOT generic 'Copy')
+    // 3. Document-wide query strictly for file-copy specific labels
     const specificCopyBtn = document.querySelector(
-      "button[aria-label='Copy file content'], button[aria-label='Copy code'], button[title='Copy file content'], button[title='Copy code']"
+      "button[aria-label='Copy file content'], button[aria-label='Copy code'], button[title='Copy file content'], button[title='Copy code'], button[aria-label='코드 복사']"
     );
     if (specificCopyBtn) return specificCopyBtn;
 
@@ -107,17 +107,45 @@
   // Helper: Extract full CodeMirror 6 document text directly from EditorView
   function getCodeMirror6Doc() {
     try {
-      const cmEditors = document.querySelectorAll(".cm-editor, .cm-content");
+      const cmEditors = document.querySelectorAll(".cm-editor, .cm-content, [data-editor]");
       for (const el of cmEditors) {
+        // 1. Direct cmView property
         let view = el.cmView?.view || el.parentElement?.cmView?.view;
+
+        // 2. Scan DOM element properties
         if (!view) {
           for (const key of Object.keys(el)) {
             if (el[key]?.view?.state?.doc) {
               view = el[key].view;
               break;
+            } else if (el[key]?.state?.doc) {
+              view = el[key];
+              break;
             }
           }
         }
+
+        // 3. Scan React Fiber
+        if (!view) {
+          const fiberKey = Object.keys(el).find(
+            (k) => k.startsWith("__reactFiber$") || k.startsWith("__reactContainer$")
+          );
+          if (fiberKey && el[fiberKey]) {
+            let fiber = el[fiberKey];
+            for (let i = 0; i < 20 && fiber; i++) {
+              if (fiber.memoizedProps?.view?.state?.doc) {
+                view = fiber.memoizedProps.view;
+                break;
+              }
+              if (fiber.memoizedState?.view?.state?.doc) {
+                view = fiber.memoizedState.view;
+                break;
+              }
+              fiber = fiber.return;
+            }
+          }
+        }
+
         if (view && view.state && view.state.doc) {
           const docStr = view.state.doc.toString();
           if (docStr !== null && docStr !== undefined) {
@@ -138,7 +166,7 @@
 
     // 1. Breadcrumbs
     const breadcrumbEls = document.querySelectorAll(
-      "[data-testid='breadcrumb'], .breadcrumb, nav[aria-label='breadcrumb'], .code-header span"
+      "[data-testid='breadcrumb'], .breadcrumb, nav[aria-label='breadcrumb'], .code-header span, header [data-filename]"
     );
     for (const b of breadcrumbEls) {
       const text = b.textContent?.trim() || "";
@@ -150,7 +178,7 @@
 
     // 2. Active Tab
     const tabEl = document.querySelector(
-      "[role='tab'][aria-selected='true'], [role='tab'][data-state='active'], [role='tab'].active"
+      "[role='tab'][aria-selected='true'], [role='tab'][data-state='active'], [role='tab'].active, .tab-active"
     );
     if (tabEl) {
       activeTab = tabEl.textContent?.replace(/x$/, "").trim() || "";
@@ -205,7 +233,7 @@
       );
     }
 
-    // B. Bulk State Extraction (Strictly verified)
+    // B. Bulk State Extraction (Extracts whatever files exist in memory cache)
     if (event.data.type === "LCD_REQUEST_STATE_EXTRACTION") {
       const files = await extractFullProjectFromReactState();
       window.postMessage(
@@ -305,20 +333,26 @@
         document.querySelector(".cm-editor"),
         document.querySelector(".code-editor-wrapper"),
         document.querySelector(".monaco-editor"),
+        document.querySelector("[data-editor]"),
       ].filter(Boolean);
 
       for (const el of editorEls) {
-        const fiberKey = Object.keys(el).find((k) => k.startsWith("__reactFiber$"));
+        const fiberKey = Object.keys(el).find(
+          (k) => k.startsWith("__reactFiber$") || k.startsWith("__reactContainer$")
+        );
         if (fiberKey) {
           let fiber = el[fiberKey];
           for (let i = 0; i < 25 && fiber; i++) {
             const props = fiber.memoizedProps;
             if (props) {
+              if (props.file && typeof props.file.content === "string" && props.file.content.length > 0) {
+                const filePath = props.file.path || props.file.name || "";
+                if (!targetPath || !filePath || filePath.endsWith(targetPath) || targetPath.endsWith(filePath.replace(/^\//, ""))) {
+                  return props.file.content;
+                }
+              }
               if (typeof props.code === "string" && props.code.length > 0) return props.code;
               if (typeof props.content === "string" && props.content.length > 0) return props.content;
-              if (props.file && typeof props.file.content === "string" && props.file.content.length > 0) {
-                return props.file.content;
-              }
               if (props.value && typeof props.value === "string" && props.value.length > 0) return props.value;
               if (props.editor && props.editor.getValue) return props.editor.getValue();
             }
@@ -331,9 +365,9 @@
     return null;
   }
 
-  // Scan React Query / TanStack Query Cache and Root Fiber (Strict validation)
+  // Scan React Query / TanStack Query Cache and Root Fiber
   async function extractFullProjectFromReactState() {
-    const files = {};
+    const allFiles = {};
 
     try {
       const rootEl = document.querySelector("#root") || document.querySelector("body > div");
@@ -343,19 +377,16 @@
         );
         if (fiberKey) {
           const rootFiber = rootEl[fiberKey];
-          const found = scanFiberForFiles(rootFiber, new Set(), 0);
-          if (found && validateProjectFiles(found)) {
-            Object.assign(files, found);
-          }
+          scanFiberForFiles(rootFiber, allFiles, new Set(), 0);
         }
       }
     } catch (_) {}
 
-    return Object.keys(files).length > 0 ? files : null;
+    return Object.keys(allFiles).length > 0 ? allFiles : null;
   }
 
-  function scanFiberForFiles(fiber, visited, depth) {
-    if (!fiber || depth > 30 || visited.has(fiber)) return null;
+  function scanFiberForFiles(fiber, allFiles, visited, depth) {
+    if (!fiber || depth > 30 || visited.has(fiber)) return;
     visited.add(fiber);
 
     const candidates = [fiber.memoizedProps, fiber.memoizedState, fiber.stateNode];
@@ -370,7 +401,9 @@
           for (const q of queries) {
             if (q.state && q.state.data) {
               const res = checkObjectForFiles(q.state.data);
-              if (res && validateProjectFiles(res)) return res;
+              if (res && Object.keys(res).length > 0) {
+                Object.assign(allFiles, res);
+              }
             }
           }
         } catch (_) {}
@@ -381,88 +414,96 @@
         try {
           const state = obj.getState();
           const res = checkObjectForFiles(state);
-          if (res && validateProjectFiles(res)) return res;
+          if (res && Object.keys(res).length > 0) {
+            Object.assign(allFiles, res);
+          }
         } catch (_) {}
       }
 
       const res = checkObjectForFiles(obj);
-      if (res && validateProjectFiles(res)) return res;
-    }
-
-    if (fiber.child) {
-      const r = scanFiberForFiles(fiber.child, visited, depth + 1);
-      if (r) return r;
-    }
-    if (fiber.sibling) {
-      const r = scanFiberForFiles(fiber.sibling, visited, depth + 1);
-      if (r) return r;
-    }
-
-    return null;
-  }
-
-  function validateProjectFiles(files) {
-    if (!files || typeof files !== "object") return false;
-    const paths = Object.keys(files);
-    // A genuine full project must contain at least 6 files
-    if (paths.length < 6) return false;
-
-    const hasPackageJson = paths.some((p) => p.endsWith("package.json") || p === "package.json");
-    const hasCoreEntry = paths.some(
-      (p) =>
-        p.endsWith("index.html") ||
-        p.endsWith("App.tsx") ||
-        p.endsWith("App.jsx") ||
-        p.endsWith("main.tsx") ||
-        p.endsWith("main.jsx") ||
-        p.endsWith("vite.config.ts") ||
-        p.endsWith("vite.config.js")
-    );
-    const srcFileCount = paths.filter((p) => p.startsWith("src/") || p.includes("/src/")).length;
-
-    if (!hasPackageJson || !hasCoreEntry || srcFileCount < 2) {
-      return false;
-    }
-
-    let validContentCount = 0;
-    for (const p of paths) {
-      const content = files[p];
-      if (typeof content === "string" && content.trim().length > 0) {
-        validContentCount++;
+      if (res && Object.keys(res).length > 0) {
+        Object.assign(allFiles, res);
       }
     }
 
-    return validContentCount >= Math.floor(paths.length * 0.75);
+    if (fiber.child) {
+      scanFiberForFiles(fiber.child, allFiles, visited, depth + 1);
+    }
+    if (fiber.sibling) {
+      scanFiberForFiles(fiber.sibling, allFiles, visited, depth + 1);
+    }
   }
 
   function checkObjectForFiles(obj) {
     if (!obj || typeof obj !== "object") return null;
 
-    const keys = Object.keys(obj);
-    const codeExts = /\.(tsx|ts|js|jsx|json|css|html|md|toml|lock|gitignore|prettierrc|config\..*)$/i;
-    const fileKeys = keys.filter((k) => codeExts.test(k) || k.includes("/"));
+    // Handle Array of file objects: [ { path: "src/App.tsx", content: "..." }, ... ]
+    if (Array.isArray(obj)) {
+      const result = {};
+      for (const item of obj) {
+        if (item && typeof item === "object") {
+          const path = item.path || item.name || item.filePath || item.filename || item.key;
+          const content = item.content || item.code || item.value || item.text || item.source;
+          if (typeof path === "string" && typeof content === "string" && (path.includes(".") || path.includes("/"))) {
+            result[path.replace(/^\//, "")] = content;
+          }
+        }
+      }
+      if (Object.keys(result).length >= 1) return result;
+    }
 
-    if (fileKeys.length >= 6) {
+    const keys = Object.keys(obj);
+    const codeExts = /\.(tsx|ts|js|jsx|mjs|cjs|mts|cts|json|json5|jsonc|css|scss|sass|less|html|md|mdx|svg|toml|yaml|yml|lock|lockb|gitignore|dockerignore|prettierrc|eslintrc|stylelintrc|config\..*|prisma|graphql|gql|astro|svelte|vue|wasm|sh|bash|sql|env.*)$/i;
+    const exactRootFiles = new Set([
+      "Dockerfile", "Dockerfile.dev", "Dockerfile.prod", "Containerfile",
+      "LICENSE", "LICENCE", "LICENSE-MIT", "LICENSE-APACHE", "LICENSE-2.0", "LICENSE.md", "LICENSE.txt",
+      "UNLICENSE", "COPYING", "AUTHORS", "CONTRIBUTING", "CONTRIBUTING.md", "CHANGELOG", "CHANGELOG.md",
+      "CODE_OF_CONDUCT", "CODE_OF_CONDUCT.md", "SECURITY", "SECURITY.md", "Makefile", "CNAME",
+      "Procfile", "Gemfile", "Rakefile", "Brewfile", "README", "README.md", "_headers", "_redirects",
+      "robots.txt", "humans.txt", "browserslist", "bun.lock", "bun.lockb", "pnpm-lock.yaml", "package-lock.json",
+      "yarn.lock", "Cargo.lock", "Cargo.toml", "go.mod", "go.sum", "composer.lock", "composer.json",
+      "Pipfile", "Pipfile.lock", "pyproject.toml", "requirements.txt"
+    ]);
+
+    const fileKeys = keys.filter(
+      (k) =>
+        codeExts.test(k) ||
+        k.includes("/") ||
+        exactRootFiles.has(k) ||
+        (k.startsWith(".") && !k.startsWith(".."))
+    );
+
+    if (fileKeys.length >= 1) {
       const result = {};
       let validCount = 0;
       for (const k of fileKeys) {
         const val = obj[k];
+        const cleanPath = k.replace(/\\/g, "/").replace(/^\//, "");
         if (typeof val === "string") {
-          result[k] = val;
+          result[cleanPath] = val;
           validCount++;
         } else if (val && typeof val.content === "string") {
-          result[k] = val.content;
+          result[cleanPath] = val.content;
+          validCount++;
+        } else if (val && typeof val.code === "string") {
+          result[cleanPath] = val.code;
+          validCount++;
+        } else if (val && typeof val.value === "string") {
+          result[cleanPath] = val.value;
+          validCount++;
+        } else if (val && typeof val.text === "string") {
+          result[cleanPath] = val.text;
           validCount++;
         }
       }
-      if (validCount >= 6) return result;
+      if (validCount >= 1) return result;
     }
 
     const nested = ["files", "projectFiles", "fileTree", "fileMap", "sources", "documents", "project", "data"];
     for (const key of nested) {
       if (obj[key] && typeof obj[key] === "object") {
         const r = checkObjectForFiles(obj[key]);
-        if (r && validateProjectFiles(r)) return r;
+        if (r && Object.keys(r).length > 0) return r;
       }
     }
 
