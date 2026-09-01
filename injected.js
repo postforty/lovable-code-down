@@ -1,15 +1,16 @@
 /**
- * Lovable Code Downloader - Injected Script (v1.1.2, Main World Context)
- * 1. Hooks navigator.clipboard & copy event to intercept "Copy file content" button.
+ * Lovable Code Downloader - Injected Script (v1.2.0, Main World Context)
+ * 1. Hooks navigator.clipboard & copy event to intercept editor's "Copy file content" button.
  * 2. Scans CodeMirror 6 / Monaco Editor state buffers directly (100% loss-free).
- * 3. Scans React Query / TanStack Query cache for full project files.
+ * 3. Provides real-time active editor state queries (breadcrumb, tab, CM6 buffer) for sync verification.
+ * 4. Strictly validates React Query / TanStack Query cache for full project files.
  */
 
 (function () {
   if (window.__LOVABLE_INJECTED_READY__) return;
   window.__LOVABLE_INJECTED_READY__ = true;
 
-  console.log("⚡ Lovable Injected Script (v1.1.2) active in Main World.");
+  console.log("⚡ Lovable Injected Script (v1.2.0) active in Main World.");
 
   let latestDownloadedText = null;
   let latestDownloadedBlob = null;
@@ -35,7 +36,7 @@
       if (interceptActive) {
         try {
           const selection = window.getSelection()?.toString();
-          if (selection && selection.length > 5) {
+          if (selection && selection.length > 0) {
             latestCopiedText = selection;
           }
         } catch (_) {}
@@ -64,6 +65,106 @@
     }
     return originalAnchorClick.apply(this, arguments);
   };
+
+  // Helper: Find editor-scoped Copy Button (prevents clicking chat message copy buttons)
+  function findEditorScopedCopyButton() {
+    // 1. Check code editor containers and their header toolbars
+    const editorContainers = document.querySelectorAll(
+      ".cm-editor, [data-editor], .monaco-editor, .code-viewer, [data-testid*='code'], [data-testid*='editor']"
+    );
+
+    for (const container of editorContainers) {
+      let headerArea = container.parentElement;
+      for (let i = 0; i < 4 && headerArea; i++) {
+        const copyBtn = headerArea.querySelector(
+          "button[aria-label*='Copy file'], button[aria-label*='Copy code'], button[title*='Copy file'], button[title*='Copy code'], button[aria-label='Copy file content']"
+        );
+        if (copyBtn) return copyBtn;
+        headerArea = headerArea.parentElement;
+      }
+    }
+
+    // 2. Check main code panel area (excluding chat panels)
+    const codePanels = document.querySelectorAll(
+      "main [data-panel-group] [data-panel]:last-child, .code-editor-wrapper, [data-radix-scroll-area-viewport] ~ div"
+    );
+    for (const panel of codePanels) {
+      const copyBtn = panel.querySelector(
+        "button[aria-label*='Copy file'], button[aria-label*='Copy code'], button[title*='Copy file'], button[title*='Copy code']"
+      );
+      if (copyBtn) return copyBtn;
+    }
+
+    // 3. Document-wide query strictly for file-copy specific labels (NOT generic 'Copy')
+    const specificCopyBtn = document.querySelector(
+      "button[aria-label='Copy file content'], button[aria-label='Copy code'], button[title='Copy file content'], button[title='Copy code']"
+    );
+    if (specificCopyBtn) return specificCopyBtn;
+
+    return null;
+  }
+
+  // Helper: Extract full CodeMirror 6 document text directly from EditorView
+  function getCodeMirror6Doc() {
+    try {
+      const cmEditors = document.querySelectorAll(".cm-editor, .cm-content");
+      for (const el of cmEditors) {
+        let view = el.cmView?.view || el.parentElement?.cmView?.view;
+        if (!view) {
+          for (const key of Object.keys(el)) {
+            if (el[key]?.view?.state?.doc) {
+              view = el[key].view;
+              break;
+            }
+          }
+        }
+        if (view && view.state && view.state.doc) {
+          const docStr = view.state.doc.toString();
+          if (docStr !== null && docStr !== undefined) {
+            return docStr;
+          }
+        }
+      }
+    } catch (_) {}
+    return null;
+  }
+
+  // Helper: Query active editor metadata for synchronization
+  function getActiveEditorInfo() {
+    let breadcrumb = "";
+    let activeTab = "";
+    let docLength = 0;
+    let docPreview = "";
+
+    // 1. Breadcrumbs
+    const breadcrumbEls = document.querySelectorAll(
+      "[data-testid='breadcrumb'], .breadcrumb, nav[aria-label='breadcrumb'], .code-header span"
+    );
+    for (const b of breadcrumbEls) {
+      const text = b.textContent?.trim() || "";
+      if (text.length > 0) {
+        breadcrumb = text;
+        break;
+      }
+    }
+
+    // 2. Active Tab
+    const tabEl = document.querySelector(
+      "[role='tab'][aria-selected='true'], [role='tab'][data-state='active'], [role='tab'].active"
+    );
+    if (tabEl) {
+      activeTab = tabEl.textContent?.replace(/x$/, "").trim() || "";
+    }
+
+    // 3. CM6 doc info
+    const docStr = getCodeMirror6Doc();
+    if (docStr !== null && docStr !== undefined) {
+      docLength = docStr.length;
+      docPreview = docStr.slice(0, 80);
+    }
+
+    return { breadcrumb, activeTab, docLength, docPreview };
+  }
 
   // Listen for messages from Content Script
   window.addEventListener("message", async (event) => {
@@ -104,7 +205,7 @@
       );
     }
 
-    // B. Bulk State Extraction
+    // B. Bulk State Extraction (Strictly verified)
     if (event.data.type === "LCD_REQUEST_STATE_EXTRACTION") {
       const files = await extractFullProjectFromReactState();
       window.postMessage(
@@ -116,38 +217,20 @@
       );
     }
 
-    // C. Intercept "Copy file content" button click
+    // C. Intercept "Copy file content" button click (Scoped)
     if (event.data.type === "LCD_REQUEST_COPY_INTERCEPT") {
       interceptActive = true;
       latestCopiedText = null;
 
-      // Exact targeting: Try finding by aria-label first
-      let copyBtn = document.querySelector("button[aria-label='Copy file content'], button[aria-label='Copy'], button[title='Copy']");
-
-      // Fallback: look for a button with a copy SVG (typical lucide-react copy icon)
-      if (!copyBtn) {
-        const buttons = document.querySelectorAll("button");
-        for (const b of buttons) {
-          const svg = b.querySelector("svg");
-          if (svg && svg.innerHTML.includes("rect") && (svg.innerHTML.includes("x=\"9\"") || svg.innerHTML.includes("x=\"8\"")) && svg.innerHTML.includes("path")) {
-            // Found a button with overlapping rectangles/paths resembling a copy icon
-            copyBtn = b;
-            break;
-          }
-        }
-      }
+      const copyBtn = findEditorScopedCopyButton();
 
       if (copyBtn) {
         copyBtn.click();
-      } else {
-        console.warn("[Lovable Code Downloader] 복사 버튼을 찾을 수 없습니다.");
-      }
-
-      // Wait for clipboard API / copy event to be triggered
-      let waitMs = 450;
-      while (waitMs > 0 && !latestCopiedText) {
-        await new Promise((r) => setTimeout(r, 25));
-        waitMs -= 25;
+        let waitMs = 450;
+        while (waitMs > 0 && !latestCopiedText) {
+          await new Promise((r) => setTimeout(r, 25));
+          waitMs -= 25;
+        }
       }
 
       interceptActive = false;
@@ -174,30 +257,30 @@
         "*"
       );
     }
+
+    // E. Query current editor active file information
+    if (event.data.type === "LCD_REQUEST_ACTIVE_FILE_INFO") {
+      const info = getActiveEditorInfo();
+      window.postMessage(
+        {
+          type: "LCD_RESPONSE_ACTIVE_FILE_INFO",
+          reqId: event.data.reqId,
+          info: info,
+        },
+        "*"
+      );
+    }
   });
 
   // Extract full code directly from CodeMirror 6, Monaco, or React Fiber
   function getFullActiveCode(targetPath) {
-    // 1. CodeMirror 6 EditorView buffer extraction
-    try {
-      const cmEditors = document.querySelectorAll(".cm-editor, .cm-content");
-      for (const el of cmEditors) {
-        if (el.cmView && el.cmView.view && el.cmView.view.state && el.cmView.view.state.doc) {
-          const docStr = el.cmView.view.state.doc.toString();
-          if (docStr && docStr.trim().length > 0) return docStr;
-        }
-        let p = el;
-        for (let i = 0; i < 6 && p; i++) {
-          if (p.cmView && p.cmView.view && p.cmView.view.state && p.cmView.view.state.doc) {
-            const docStr = p.cmView.view.state.doc.toString();
-            if (docStr && docStr.trim().length > 0) return docStr;
-          }
-          p = p.parentElement;
-        }
-      }
-    } catch (_) {}
+    // 1. CodeMirror 6 EditorView buffer extraction (Highest priority, 100% complete)
+    const cmDoc = getCodeMirror6Doc();
+    if (cmDoc !== null && cmDoc !== undefined && cmDoc.length > 0) {
+      return cmDoc;
+    }
 
-    // 2. Monaco Editor models
+    // 2. Monaco Editor models (Strict path matching)
     try {
       if (window.monaco && window.monaco.editor && window.monaco.editor.getModels) {
         const models = window.monaco.editor.getModels();
@@ -212,8 +295,6 @@
               if (val && val.length > 0) return val;
             }
           }
-          const last = models[models.length - 1];
-          if (last && last.getValue) return last.getValue();
         }
       }
     } catch (_) {}
@@ -233,12 +314,12 @@
           for (let i = 0; i < 25 && fiber; i++) {
             const props = fiber.memoizedProps;
             if (props) {
-              if (typeof props.code === "string" && props.code.length > 5) return props.code;
-              if (typeof props.content === "string" && props.content.length > 5) return props.content;
-              if (props.file && typeof props.file.content === "string" && props.file.content.length > 5) {
+              if (typeof props.code === "string" && props.code.length > 0) return props.code;
+              if (typeof props.content === "string" && props.content.length > 0) return props.content;
+              if (props.file && typeof props.file.content === "string" && props.file.content.length > 0) {
                 return props.file.content;
               }
-              if (props.value && typeof props.value === "string" && props.value.length > 5) return props.value;
+              if (props.value && typeof props.value === "string" && props.value.length > 0) return props.value;
               if (props.editor && props.editor.getValue) return props.editor.getValue();
             }
             fiber = fiber.return;
@@ -250,7 +331,7 @@
     return null;
   }
 
-  // Scan React Query / TanStack Query Cache and Root Fiber
+  // Scan React Query / TanStack Query Cache and Root Fiber (Strict validation)
   async function extractFullProjectFromReactState() {
     const files = {};
 
@@ -323,16 +404,25 @@
   function validateProjectFiles(files) {
     if (!files || typeof files !== "object") return false;
     const paths = Object.keys(files);
-    if (paths.length < 4) return false;
+    // A genuine full project must contain at least 6 files
+    if (paths.length < 6) return false;
 
-    const hasCoreFiles = paths.some(
+    const hasPackageJson = paths.some((p) => p.endsWith("package.json") || p === "package.json");
+    const hasCoreEntry = paths.some(
       (p) =>
-        p.includes("package.json") ||
-        p.includes("index.html") ||
-        p.includes("src/") ||
-        p.includes("vite.config") ||
-        p.includes("components.json")
+        p.endsWith("index.html") ||
+        p.endsWith("App.tsx") ||
+        p.endsWith("App.jsx") ||
+        p.endsWith("main.tsx") ||
+        p.endsWith("main.jsx") ||
+        p.endsWith("vite.config.ts") ||
+        p.endsWith("vite.config.js")
     );
+    const srcFileCount = paths.filter((p) => p.startsWith("src/") || p.includes("/src/")).length;
+
+    if (!hasPackageJson || !hasCoreEntry || srcFileCount < 2) {
+      return false;
+    }
 
     let validContentCount = 0;
     for (const p of paths) {
@@ -342,7 +432,7 @@
       }
     }
 
-    return hasCoreFiles && validContentCount >= 4;
+    return validContentCount >= Math.floor(paths.length * 0.75);
   }
 
   function checkObjectForFiles(obj) {
@@ -352,7 +442,7 @@
     const codeExts = /\.(tsx|ts|js|jsx|json|css|html|md|toml|lock|gitignore|prettierrc|config\..*)$/i;
     const fileKeys = keys.filter((k) => codeExts.test(k) || k.includes("/"));
 
-    if (fileKeys.length >= 4) {
+    if (fileKeys.length >= 6) {
       const result = {};
       let validCount = 0;
       for (const k of fileKeys) {
@@ -365,7 +455,7 @@
           validCount++;
         }
       }
-      if (validCount >= 4) return result;
+      if (validCount >= 6) return result;
     }
 
     const nested = ["files", "projectFiles", "fileTree", "fileMap", "sources", "documents", "project", "data"];
