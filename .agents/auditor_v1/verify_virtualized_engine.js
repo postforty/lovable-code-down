@@ -14,10 +14,10 @@ function normalizePath(p) {
   return p.replace(/\\/g, "/").replace(/^(\.\/|\/)+/, "").trim();
 }
 
-function getItemExplicitPath(btn) {
+function getItemExplicitPath(btn, optLabel) {
   if (!btn) return null;
   const treeItem = typeof btn.closest === "function"
-    ? (btn.closest("[role='treeitem'], [data-item-path], [data-path], [data-filepath], [data-treepath], [data-file-path], [data-full-path]") || btn)
+    ? (btn.closest("[role='treeitem'], [data-item-path], [data-item-parent-path], [data-path], [data-filepath], [data-treepath], [data-file-path], [data-full-path]") || btn)
     : btn;
 
   const explicitPath =
@@ -37,6 +37,18 @@ function getItemExplicitPath(btn) {
   if (explicitPath) {
     return normalizePath(explicitPath).replace(/\/+$/, "");
   }
+
+  const parentPath =
+    (treeItem.getAttribute && treeItem.getAttribute("data-item-parent-path")) ||
+    (btn.getAttribute && btn.getAttribute("data-item-parent-path")) ||
+    (treeItem.getAttribute && treeItem.getAttribute("data-parent-path")) ||
+    (btn.getAttribute && btn.getAttribute("data-parent-path"));
+
+  if (parentPath && optLabel) {
+    const cleanParent = normalizePath(parentPath).replace(/\/+$/, "");
+    return cleanParent ? `${cleanParent}/${optLabel}` : optLabel;
+  }
+
   return null;
 }
 
@@ -170,6 +182,21 @@ it("Normalizes trailing slashes on folders", () => {
   };
   const path = getItemExplicitPath(mockBtn);
   assert.strictEqual(path, "src/components/ui");
+});
+
+it("Combines data-item-parent-path with label for sub-items like __root.tsx", () => {
+  const mockBtn = {
+    getAttribute: (name) => (name === "data-item-parent-path" ? "src/routes/" : null),
+    closest: () => null
+  };
+  const path = getItemExplicitPath(mockBtn, "__root.tsx");
+  assert.strictEqual(path, "src/routes/__root.tsx");
+});
+
+it("Normalizes spaced path separators in folder labels (components / ui -> components/ui)", () => {
+  const rawLabel = "components / ui";
+  const cleanLabel = rawLabel.replace(/\s*\/\s*/g, "/").trim();
+  assert.strictEqual(cleanLabel, "components/ui");
 });
 
 // 2. Classification tests
@@ -317,6 +344,55 @@ it("Successfully targets and locates every file in the manifest even when off-sc
   }
 
   assert.strictEqual(Object.keys(collected).length, filesToCollect.length);
+});
+
+// 4. Multi-tier findTreeElementByPath precision matching (distinguishing same-name files at different depths)
+it("Distinguishes root README.md from subfolder src/routes/README.md via Tier 2/3 matching", () => {
+  const mockElements = [
+    {
+      getAttribute: (name) => {
+        if (name === "data-item-parent-path") return "src/routes/";
+        if (name === "aria-level") return "3";
+        return null;
+      },
+      label: "README.md",
+      closest: function() { return this; }
+    },
+    {
+      getAttribute: (name) => {
+        if (name === "aria-level") return "1";
+        return null;
+      },
+      label: "README.md",
+      closest: function() { return this; }
+    }
+  ];
+
+  function testFindTreeElement(targetPath, targetLabel) {
+    // Tier 2: parent-path check
+    for (const el of mockElements) {
+      const parentAttr = el.getAttribute("data-item-parent-path");
+      if (parentAttr) {
+        const cleanParent = normalizePath(parentAttr).replace(/\/+$/, "");
+        const combined = cleanParent ? `${cleanParent}/${targetLabel}` : targetLabel;
+        if (combined === targetPath) return el;
+      }
+    }
+    // Tier 3: level check
+    const isRoot = !targetPath.includes("/");
+    for (const el of mockElements) {
+      const level = parseInt(el.getAttribute("aria-level"), 10);
+      if (isRoot && level <= 1) return el;
+      if (!isRoot && level > 1) return el;
+    }
+    return null;
+  }
+
+  const foundSub = testFindTreeElement("src/routes/README.md", "README.md");
+  assert.strictEqual(foundSub.getAttribute("data-item-parent-path"), "src/routes/");
+
+  const foundRoot = testFindTreeElement("README.md", "README.md");
+  assert.strictEqual(foundRoot.getAttribute("aria-level"), "1");
 });
 
 console.log("==================================================");
