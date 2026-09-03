@@ -1,14 +1,14 @@
 /**
- * Lovable Code Downloader - Content Script (v1.3.2)
+ * Lovable Code Downloader - Content Script (v1.3.3)
  * Zero-Loss Manifest-First Virtualized Tree Crawler & Precision Multi-Tier Code Extractor.
- * [v1.3.2] Progressive Monotonic Streaming Traversal & Multi-Tier Path Matching for 100% Zero-Loss Collection.
+ * [v1.3.3] Universal Virtual Tree Scroller & Text Target Clicking with Escape Key Popup Protection.
  */
 
 (function () {
   if (window.__LOVABLE_CODE_DOWNLOADER_INJECTED__) return;
   window.__LOVABLE_CODE_DOWNLOADER_INJECTED__ = true;
 
-  console.log("⚡ Lovable Code Downloader (v1.3.2) active.");
+  console.log("⚡ Lovable Code Downloader (v1.3.3) active.");
 
   let isExtracting = false;
   let shouldAbort = false;
@@ -417,6 +417,59 @@
     }
 
     return null;
+  }
+
+  // Universal Virtual Tree Scroller: directly adjusts scrollTop and fires native scroll events
+  function scrollTreeVertically(delta) {
+    const candidateSelectors = [
+      "[data-file-tree-virtualized-scroll='true']",
+      "[data-file-tree-virtualized-scroll]",
+      "[data-file-tree-virtualized-root='true']",
+      "#pst_ft_5__tree",
+      "[data-file-tree-virtualized-wrapper='true']",
+      "[role='tree']",
+      "aside [data-radix-scroll-area-viewport]",
+      "[data-panel] [data-radix-scroll-area-viewport]",
+      "[data-radix-scroll-area-viewport]",
+      "aside .overflow-y-auto"
+    ];
+
+    let scrolled = false;
+    for (const sel of candidateSelectors) {
+      const el = document.querySelector(sel);
+      if (el) {
+        const prev = el.scrollTop;
+        el.scrollTop = Math.max(0, el.scrollTop + delta);
+        if (el.scrollTop !== prev) {
+          scrolled = true;
+        }
+        el.dispatchEvent(new Event("scroll", { bubbles: true }));
+      }
+    }
+    return scrolled;
+  }
+
+  function resetTreeToTop() {
+    const candidateSelectors = [
+      "[data-file-tree-virtualized-scroll='true']",
+      "[data-file-tree-virtualized-scroll]",
+      "[data-file-tree-virtualized-root='true']",
+      "#pst_ft_5__tree",
+      "[data-file-tree-virtualized-wrapper='true']",
+      "[role='tree']",
+      "aside [data-radix-scroll-area-viewport]",
+      "[data-panel] [data-radix-scroll-area-viewport]",
+      "[data-radix-scroll-area-viewport]",
+      "aside .overflow-y-auto"
+    ];
+
+    for (const sel of candidateSelectors) {
+      const el = document.querySelector(sel);
+      if (el) {
+        el.scrollTop = 0;
+        el.dispatchEvent(new Event("scroll", { bubbles: true }));
+      }
+    }
   }
 
   // Find all visible tree items across document and Shadow DOMs with robust deduplication
@@ -837,9 +890,8 @@
     return false;
   }
 
-  // Deterministically expand ALL closed folders across the virtual tree (Anchor Scroll + Full Convergence)
+  // Deterministically expand ALL closed folders across the virtual tree (Full Convergence)
   async function expandAllTreeFolders() {
-    const container = getTreeScrollContainer();
     const maxPasses = 10;
     let pass = 0;
     let totalOpened = 0;
@@ -850,10 +902,8 @@
       pass++;
       let openedInThisPass = 0;
 
-      // Scroll to top
-      if (container) container.scrollTop = 0;
-      const topItems = getAllTreeElements();
-      if (topItems.length > 0) topItems[0].scrollIntoView({ block: "start", behavior: "instant" });
+      // Reset to top
+      resetTreeToTop();
       await sleep(150);
 
       let noNewElementsStreak = 0;
@@ -907,22 +957,16 @@
           }
         }
 
-        // Anchor scroll: scroll the last visible element into view
+        // Scroll down
+        const didScroll = scrollTreeVertically(100);
         if (visibleItems.length > 0) {
-          const lastItem = visibleItems[visibleItems.length - 1];
-          lastItem.scrollIntoView({ block: "end", behavior: "instant" });
+          visibleItems[visibleItems.length - 1].scrollIntoView({ block: "end", behavior: "instant" });
         }
 
-        if (container) {
-          const prev = container.scrollTop;
-          container.scrollTop = prev + Math.max(64, Math.floor(container.clientHeight * 0.35));
-          if (container.scrollTop === prev && !actionTaken) {
-            noNewElementsStreak++;
-          } else {
-            noNewElementsStreak = 0;
-          }
+        if (!didScroll && !actionTaken) {
+          noNewElementsStreak++;
         } else {
-          if (!actionTaken) noNewElementsStreak++;
+          noNewElementsStreak = 0;
         }
 
         await sleep(120);
@@ -934,9 +978,7 @@
       }
     }
 
-    if (container) container.scrollTop = 0;
-    const finalTop = getAllTreeElements();
-    if (finalTop.length > 0) finalTop[0].scrollIntoView({ block: "start", behavior: "instant" });
+    resetTreeToTop();
     await sleep(200);
     addLog(`✨ 총 ${totalOpened}개 폴더 확장 완료. 파일 명단 전수 스캔을 준비합니다.`, "success");
   }
@@ -999,10 +1041,7 @@
 
   // Backup search: scrolls through entire virtual tree from top to bottom if progressive search missed an item
   async function fallbackSearchItem(targetPath, targetLabel) {
-    const container = getTreeScrollContainer();
-    if (container) container.scrollTop = 0;
-    const topItems = getAllTreeElements();
-    if (topItems.length > 0) topItems[0].scrollIntoView({ block: "start", behavior: "instant" });
+    resetTreeToTop();
     await sleep(150);
 
     let attempts = 0;
@@ -1013,11 +1052,11 @@
       const found = findTreeElementByPath(targetPath, targetLabel);
       if (found) return found;
 
+      scrollTreeVertically(90);
       const visible = getAllTreeElements();
       if (visible.length > 0) {
         visible[visible.length - 1].scrollIntoView({ block: "end", behavior: "instant" });
       }
-      if (container) container.scrollTop += 90;
       await sleep(120);
     }
     return findTreeElementByPath(targetPath, targetLabel);
@@ -1025,23 +1064,16 @@
 
   // Phase 2: Complete Manifest Scan (Anchor Scroll, 100% loss-free discovery of all file paths)
   async function scanAllTreeFilesManifest() {
-    const container = getTreeScrollContainer();
     const manifestSet = new Set();
     const orderedFiles = [];
 
-    if (container) {
-      container.scrollTop = 0;
-    }
-    const firstItems = getAllTreeElements();
-    if (firstItems.length > 0) {
-      firstItems[0].scrollIntoView({ block: "start", behavior: "instant" });
-    }
+    resetTreeToTop();
     await sleep(200);
 
     addLog("📋 전체 파일 명단(Manifest) 100% 무누락 전수 스캔 시작...", "info");
 
     let noNewItemsStreak = 0;
-    const maxStreak = 6;
+    const maxStreak = 7;
     let pathStack = [];
 
     while (noNewItemsStreak < maxStreak) {
@@ -1085,26 +1117,16 @@
         noNewItemsStreak++;
       }
 
-      // Anchor scroll: scroll the last visible item into view
+      // Scroll down across all containers and elements
+      scrollTreeVertically(80);
       if (visibleItems.length > 0) {
-        const lastItem = visibleItems[visibleItems.length - 1];
-        lastItem.scrollIntoView({ block: "end", behavior: "instant" });
-      }
-
-      // Also nudge container.scrollTop forward
-      if (container) {
-        const step = Math.max(64, Math.floor(container.clientHeight * 0.3));
-        container.scrollTop = container.scrollTop + step;
+        visibleItems[visibleItems.length - 1].scrollIntoView({ block: "end", behavior: "instant" });
       }
 
       await sleep(150); // 가상화 렌더링 안정화 대기
     }
 
-    if (container) {
-      container.scrollTop = 0;
-    }
-    const finalTop = getAllTreeElements();
-    if (finalTop.length > 0) finalTop[0].scrollIntoView({ block: "start", behavior: "instant" });
+    resetTreeToTop();
     await sleep(150);
 
     addLog(`📋 총 ${orderedFiles.length}개 파일 명단(Manifest) 확정 완료!`, "success");
@@ -1117,10 +1139,7 @@
     const totalFiles = manifestFiles.length;
 
     // Reset to top of virtual tree once before streaming downwards
-    const topContainer = getTreeScrollContainer();
-    if (topContainer) topContainer.scrollTop = 0;
-    const firstTop = getAllTreeElements();
-    if (firstTop.length > 0) firstTop[0].scrollIntoView({ block: "start", behavior: "instant" });
+    resetTreeToTop();
     await sleep(250);
 
     for (let index = 0; index < totalFiles; index++) {
@@ -1157,19 +1176,14 @@
 
       // 현재 화면에 없다면, 아래로 점진 스크롤(Progressive Downward Scroll)하며 탐색!
       let scrollAttempts = 0;
-      while (!targetBtn && scrollAttempts < 40) {
+      while (!targetBtn && scrollAttempts < 45) {
         if (shouldAbort) break;
         scrollAttempts++;
 
+        scrollTreeVertically(80);
         const visibleItems = getAllTreeElements();
         if (visibleItems.length > 0) {
-          const lastItem = visibleItems[visibleItems.length - 1];
-          lastItem.scrollIntoView({ block: "end", behavior: "instant" });
-        }
-
-        const scrollContainer = getTreeScrollContainer();
-        if (scrollContainer) {
-          scrollContainer.scrollTop = scrollContainer.scrollTop + 80;
+          visibleItems[visibleItems.length - 1].scrollIntoView({ block: "end", behavior: "instant" });
         }
 
         await sleep(120); // 가상화 DOM 마운트 대기
@@ -1187,11 +1201,18 @@
         continue;
       }
 
-      // 3. 클릭 및 로드 대기
+      // 3. 클릭 및 로드 대기 (텍스트 영역 타겟팅 + Escape 키 팝업 메뉴 방어)
       targetBtn.scrollIntoView({ block: "center", behavior: "instant" });
       await sleep(60);
-      targetBtn.click();
-      await sleep(150);
+
+      const textTarget =
+        targetBtn.querySelector("span:not([aria-hidden]), [data-item-label], .tree-item-label") || targetBtn;
+      textTarget.click();
+      await sleep(100);
+
+      // 혹시 컨텍스트 메뉴가 열렸다면 즉시 닫기
+      document.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", code: "Escape", keyCode: 27, bubbles: true }));
+      await sleep(50);
 
       await waitForEditorToLoadFile(fullPath, label, 1500);
 
