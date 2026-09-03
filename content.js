@@ -1,13 +1,13 @@
 /**
- * Lovable Code Downloader - Content Script (v1.2.1)
- * Precision Virtualized Tree Crawler & Lossless Multi-Tier Code Extractor.
+ * Lovable Code Downloader - Content Script (v1.3.0)
+ * Zero-Loss Manifest-First Virtualized Tree Crawler & Precision Multi-Tier Code Extractor.
  */
 
 (function () {
   if (window.__LOVABLE_CODE_DOWNLOADER_INJECTED__) return;
   window.__LOVABLE_CODE_DOWNLOADER_INJECTED__ = true;
 
-  console.log("⚡ Lovable Code Downloader (v1.2.1) active.");
+  console.log("⚡ Lovable Code Downloader (v1.3.0) active.");
 
   let isExtracting = false;
   let shouldAbort = false;
@@ -221,7 +221,7 @@
       // 2. Ensure Code Tab is active
       await ensureCodeViewActive();
 
-      // 3. Step 1: Expand ALL folders in the tree
+      // 3. Step 1: Expand ALL folders in the tree (Full Convergence)
       addLog("📁 파일 트리의 모든 폴더를 전수 순회 및 확장하는 중...", "info");
       await expandAllTreeFolders();
 
@@ -230,9 +230,18 @@
         return;
       }
 
-      // 4. Step 2: Collect ALL files across the full tree hierarchy
-      addLog("🔍 전체 파일 계층 탐색 및 소스코드 정밀 수집 시작...", "info");
-      const collectedFiles = await collectAllTreeFiles(stateCache);
+      // 4. Step 2: Scan complete file manifest (100% loss-free discovery)
+      addLog("🔍 전체 파일 명단(Manifest) 100% 무누락 전수 스캔 중...", "info");
+      const manifestFiles = await scanAllTreeFilesManifest();
+
+      if (shouldAbort) {
+        addLog("수집 작업이 중단되었습니다.", "warning");
+        return;
+      }
+
+      // 5. Step 3: Collect code from confirmed manifest
+      addLog("⚡ 확정된 파일 명단 기반 정밀 소스코드 수집 시작...", "info");
+      const collectedFiles = await collectFilesFromManifest(manifestFiles, stateCache);
 
       if (shouldAbort) {
         addLog("수집 작업이 중단되었습니다.", "warning");
@@ -350,6 +359,12 @@
 
   // Find the virtual scroll container for the tree
   function getTreeScrollContainer() {
+    // 0. Explicit Lovable virtualized scroll container (Highest priority)
+    const lovableVirtualScroll = document.querySelector(
+      "[data-file-tree-virtualized-scroll='true'], [data-file-tree-virtualized-scroll]"
+    );
+    if (lovableVirtualScroll) return lovableVirtualScroll;
+
     const treeItems = document.querySelectorAll(
       "[role='treeitem'], [role='tree'] button, div[role='tree'] [tabindex], [data-testid*='file-tree']"
     );
@@ -468,9 +483,36 @@
     return uniqueItems;
   }
 
+  // Item explicit path extractor (reads data-item-path directly from Lovable virtual treeitem)
+  function getItemExplicitPath(btn) {
+    if (!btn) return null;
+    const treeItem = typeof btn.closest === "function"
+      ? (btn.closest("[role='treeitem'], [data-item-path], [data-path], [data-filepath], [data-treepath], [data-file-path], [data-full-path]") || btn)
+      : btn;
+
+    const explicitPath =
+      (treeItem.getAttribute && treeItem.getAttribute("data-item-path")) ||
+      (btn.getAttribute && btn.getAttribute("data-item-path")) ||
+      (treeItem.getAttribute && treeItem.getAttribute("data-path")) ||
+      (btn.getAttribute && btn.getAttribute("data-path")) ||
+      (treeItem.getAttribute && treeItem.getAttribute("data-filepath")) ||
+      (btn.getAttribute && btn.getAttribute("data-filepath")) ||
+      (treeItem.getAttribute && treeItem.getAttribute("data-treepath")) ||
+      (btn.getAttribute && btn.getAttribute("data-treepath")) ||
+      (treeItem.getAttribute && treeItem.getAttribute("data-file-path")) ||
+      (btn.getAttribute && btn.getAttribute("data-file-path")) ||
+      (treeItem.getAttribute && treeItem.getAttribute("data-full-path")) ||
+      (btn.getAttribute && btn.getAttribute("data-full-path"));
+
+    if (explicitPath) {
+      return normalizePath(explicitPath).replace(/\/+$/, "");
+    }
+    return null;
+  }
+
   // Item label extractor
   function getLabel(btn) {
-    const treeItem = btn.closest("[role='treeitem'], [data-path], [data-filename], [data-name]") || btn;
+    const treeItem = btn.closest("[role='treeitem'], [data-item-path], [data-path], [data-filename], [data-name]") || btn;
 
     const directName =
       treeItem.getAttribute("data-filename") ||
@@ -479,7 +521,11 @@
       btn.getAttribute("data-name");
     if (directName) return directName.trim();
 
-    const dataPath = treeItem.getAttribute("data-path") || btn.getAttribute("data-path");
+    const dataPath =
+      treeItem.getAttribute("data-item-path") ||
+      btn.getAttribute("data-item-path") ||
+      treeItem.getAttribute("data-path") ||
+      btn.getAttribute("data-path");
     if (dataPath) {
       const cleanPath = dataPath.replace(/\\/g, "/").replace(/\/+$/, "");
       const parts = cleanPath.split("/");
@@ -580,15 +626,28 @@
 
   // Accurate Tree Item Classifier (distinguishes folders vs extensionless files vs dot-folders)
   function classifyTreeItem(el, label) {
-    if (!label) return { isFolder: false, isOpen: false };
-
     const treeItem = (el && typeof el.closest === "function")
       ? (el.closest("[role='treeitem'], [data-state], [aria-expanded], [data-item-type]") || el)
       : (el || null);
 
-    // 1. Explicit aria-expanded (W3C standard for tree folders)
+    // 0. Explicit data-item-type / data-type (Lovable virtual tree standard)
+    const itemType =
+      (el && el.getAttribute ? el.getAttribute("data-item-type") || el.getAttribute("data-type") : null) ||
+      (treeItem && treeItem.getAttribute ? treeItem.getAttribute("data-item-type") || treeItem.getAttribute("data-type") : null);
+
     const ariaExpanded = (el && el.getAttribute ? el.getAttribute("aria-expanded") : null) ||
                          (treeItem && treeItem.getAttribute ? treeItem.getAttribute("aria-expanded") : null);
+
+    if (itemType === "folder" || itemType === "directory") {
+      if (ariaExpanded === "true") return { isFolder: true, isOpen: true };
+      if (ariaExpanded === "false") return { isFolder: true, isOpen: false };
+      return { isFolder: true, isOpen: isElementVisuallyExpanded(el, treeItem) };
+    }
+    if (itemType === "file") return { isFolder: false, isOpen: false };
+
+    if (!label) return { isFolder: false, isOpen: false };
+
+    // 1. Explicit aria-expanded (W3C standard for tree folders)
     if (ariaExpanded === "true") return { isFolder: true, isOpen: true };
     if (ariaExpanded === "false") return { isFolder: true, isOpen: false };
 
@@ -597,15 +656,6 @@
                       (treeItem && treeItem.getAttribute ? treeItem.getAttribute("data-state") : null);
     if (dataState === "open") return { isFolder: true, isOpen: true };
     if (dataState === "closed") return { isFolder: true, isOpen: false };
-
-    // 3. Explicit data-item-type / data-type
-    const itemType =
-      (el && el.getAttribute ? el.getAttribute("data-item-type") || el.getAttribute("data-type") : null) ||
-      (treeItem && treeItem.getAttribute ? treeItem.getAttribute("data-item-type") || treeItem.getAttribute("data-type") : null);
-    if (itemType === "folder" || itemType === "directory") {
-      return { isFolder: true, isOpen: isElementVisuallyExpanded(el, treeItem) };
-    }
-    if (itemType === "file") return { isFolder: false, isOpen: false };
 
     // 4. SVG icon inspection (Chevron, Folder vs File icons)
     const svgs = (treeItem && treeItem.querySelectorAll ? treeItem.querySelectorAll("svg") : []) ||
@@ -743,35 +793,34 @@
     return false;
   }
 
-  // Deterministically expand ALL closed folders across the virtual tree
+  // Deterministically expand ALL closed folders across the virtual tree (Full Convergence)
   async function expandAllTreeFolders() {
     const container = getTreeScrollContainer();
-    const maxPasses = 8;
+    const maxPasses = 10;
     let pass = 0;
-    let hasOpenedInPass = true;
+    let totalOpened = 0;
     const expandedSet = new Set();
 
-    while (hasOpenedInPass && pass < maxPasses) {
+    while (pass < maxPasses) {
       if (shouldAbort) break;
       pass++;
-      hasOpenedInPass = false;
+      let openedInThisPass = 0;
 
       if (container) {
         container.scrollTop = 0;
-        await sleep(100);
+        await sleep(150);
       }
 
       let currentScroll = 0;
-      const maxScroll = container ? Math.max(container.scrollHeight, 1000) : 1000;
-      const scrollStep = container ? Math.max(80, Math.floor(container.clientHeight * 0.5)) : 160;
+      const scrollStep = container ? Math.max(80, Math.floor(container.clientHeight * 0.35)) : 100;
       let pathStack = [];
 
-      while (currentScroll <= maxScroll + 200) {
+      while (true) {
         if (shouldAbort) break;
 
         if (container) {
           container.scrollTop = currentScroll;
-          await sleep(60);
+          await sleep(100);
         }
 
         const visibleItems = getAllTreeElements();
@@ -785,13 +834,12 @@
           const level = getItemLevel(btn);
           const { isFolder, isOpen } = classifyTreeItem(btn, label);
 
-          // Adjust path stack based on indentation level
           while (pathStack.length > 0 && pathStack[pathStack.length - 1].level >= level) {
             pathStack.pop();
           }
 
           const parentFolder = pathStack.map((p) => p.name).join("/");
-          const explicitPath = (btn.closest("[data-path]") || btn).getAttribute("data-path");
+          const explicitPath = getItemExplicitPath(btn);
           const folderFullPath = normalizePath(explicitPath || (parentFolder ? `${parentFolder}/${label}` : label));
 
           if (isFolder) {
@@ -802,63 +850,112 @@
                 continue;
               }
 
-              addLog(`📂 폴더 확장: ${folderFullPath}`, "info");
+              addLog(`📂 [${pass}회차] 폴더 확장: ${folderFullPath}`, "info");
 
-              // Single deterministic click to toggle folder open (avoid action/more buttons)
               const trigger =
                 btn.querySelector("[aria-expanded], [data-state], button:not([aria-label*='more' i]):not([aria-label*='action' i]):not([aria-label*='option' i])") ||
                 btn;
               trigger.click();
-              await sleep(200);
+              await sleep(250); // 충분한 가상화 DOM 마운트 대기
 
               expandedSet.add(folderFullPath);
-              hasOpenedInPass = true;
+              openedInThisPass++;
+              totalOpened++;
             }
           }
         }
 
-        currentScroll += scrollStep;
-        if (container && currentScroll > container.scrollHeight) break;
+        const maxScroll = container ? Math.max(0, container.scrollHeight - container.clientHeight) : 0;
+        if (!container || currentScroll >= maxScroll) {
+          break;
+        }
+        currentScroll = Math.min(currentScroll + scrollStep, maxScroll);
+      }
+
+      addLog(`📁 [${pass}회차 스캔 완료] 새로 열린 폴더: ${openedInThisPass}개`, "info");
+      if (openedInThisPass === 0) {
+        break;
       }
     }
 
     if (container) {
       container.scrollTop = 0;
-      await sleep(150);
+      await sleep(200);
     }
+    addLog(`✨ 총 ${totalOpened}개 폴더 확장 완료. 파일 명단 전수 스캔을 준비합니다.`, "success");
   }
 
-  // Deterministically collect all files with monotonic top-to-bottom virtual scroll
-  async function collectAllTreeFiles(stateCache = {}) {
-    const files = {};
-    const processedPaths = new Set();
+  // Find a visible tree element by exact targetPath or label
+  function findTreeElementByPath(targetPath, targetLabel) {
+    const visibleItems = getAllTreeElements();
+    for (const btn of visibleItems) {
+      const explicit = getItemExplicitPath(btn);
+      if (explicit && explicit === targetPath) {
+        return btn;
+      }
+      const label = getLabel(btn);
+      if (label === targetLabel) {
+        const { isFolder } = classifyTreeItem(btn, label);
+        if (!isFolder) {
+          if (!targetPath.includes("/") || targetPath.endsWith("/" + label)) {
+            return btn;
+          }
+        }
+      }
+    }
+    return null;
+  }
+
+  // Scroll through virtual container to locate and mount a specific tree item
+  async function searchAndScrollToItem(container, targetPath, targetLabel) {
+    if (!container) return null;
+    const maxScroll = Math.max(0, container.scrollHeight - container.clientHeight);
+    const scrollStep = Math.max(80, Math.floor(container.clientHeight * 0.4));
+    let cur = 0;
+
+    // Search from top to bottom
+    while (cur <= maxScroll) {
+      if (shouldAbort) break;
+      container.scrollTop = cur;
+      await sleep(90);
+
+      const found = findTreeElementByPath(targetPath, targetLabel);
+      if (found) return found;
+
+      if (cur >= maxScroll) break;
+      cur = Math.min(cur + scrollStep, maxScroll);
+    }
+
+    return null;
+  }
+
+  // Phase 2: Complete Manifest Scan (100% loss-free discovery of all file paths)
+  async function scanAllTreeFilesManifest() {
     const container = getTreeScrollContainer();
+    const manifestSet = new Set();
+    const orderedFiles = [];
 
     if (container) {
       container.scrollTop = 0;
-      await sleep(150);
+      await sleep(200);
     }
 
-    addLog("가상화 트리 파일 수집 및 무손실 버퍼 추출 진행 중...", "info");
+    addLog("📋 전체 파일 명단(Manifest) 100% 무누락 전수 스캔 시작...", "info");
 
     let currentScroll = 0;
-    const maxScroll = container ? Math.max(container.scrollHeight, 2000) : 2000;
-    const scrollStep = container ? Math.max(60, Math.floor(container.clientHeight * 0.4)) : 120;
+    const scrollStep = container ? Math.max(48, Math.floor(container.clientHeight * 0.25)) : 64;
     let pathStack = [];
 
-    while (currentScroll <= maxScroll + 500) {
+    while (true) {
       if (shouldAbort) break;
 
       if (container) {
         container.scrollTop = currentScroll;
-        await sleep(80);
+        await sleep(100); // 가상화 렌더링 안정화 대기
       }
 
       const visibleItems = getAllTreeElements();
-
       for (let i = 0; i < visibleItems.length; i++) {
-        if (shouldAbort) break;
-
         const btn = visibleItems[i];
         const label = getLabel(btn);
         if (!label || label === "Options" || label === "horizontal" || label === "More actions") continue;
@@ -866,7 +963,6 @@
         const level = getItemLevel(btn);
         const { isFolder } = classifyTreeItem(btn, label);
 
-        // Adjust path stack based on indentation level
         while (pathStack.length > 0 && pathStack[pathStack.length - 1].level >= level) {
           pathStack.pop();
         }
@@ -876,80 +972,146 @@
           continue;
         }
 
-        // It is a file: construct full relative path
-        const explicitPath = (btn.closest("[data-path], [data-filepath], [data-treepath], [data-file-path], [data-full-path]") || btn).getAttribute("data-path") ||
-                             (btn.closest("[data-filepath]") || btn).getAttribute("data-filepath") ||
-                             (btn.closest("[data-treepath]") || btn).getAttribute("data-treepath");
+        // File: resolve full path
+        const explicitPath = getItemExplicitPath(btn);
         const folderPath = pathStack.map((p) => p.name).join("/");
         const fullPath = normalizePath(explicitPath || (folderPath ? `${folderPath}/${label}` : label));
 
-        if (processedPaths.has(fullPath)) continue;
-        processedPaths.add(fullPath);
-
-        updateProgress(
-          Math.min(90, processedPaths.size * 2),
-          fullPath,
-          `파일 수집 중 (${processedPaths.size}개 완료)`
-        );
-
-        // Check if pre-cached in React state (safe matching by exact path or root file)
-        const cachedCode =
-          stateCache[fullPath] !== undefined
-            ? stateCache[fullPath]
-            : stateCache[`/${fullPath}`] !== undefined
-            ? stateCache[`/${fullPath}`]
-            : pathStack.length === 0 && stateCache[label] !== undefined
-            ? stateCache[label]
-            : undefined;
-
-        if (cachedCode !== undefined && cachedCode !== null) {
-          files[fullPath] = cachedCode;
-          const previewSnippet = typeof cachedCode === "string" ? cachedCode.replace(/\s+/g, " ").slice(0, 35) : "asset";
-          addLog(`✔ [캐시] ${fullPath} [${previewSnippet}...]`, "info");
-          continue;
+        if (fullPath && !manifestSet.has(fullPath)) {
+          manifestSet.add(fullPath);
+          orderedFiles.push({ path: fullPath, label: label });
         }
+      }
 
-        // Open file in editor
-        btn.scrollIntoView({ block: "nearest" });
-        btn.click();
+      const maxScroll = container ? Math.max(0, container.scrollHeight - container.clientHeight) : 0;
+      if (!container || currentScroll >= maxScroll) {
+        break;
+      }
+      currentScroll = Math.min(currentScroll + scrollStep, maxScroll);
+    }
 
-        // Synchronize and wait for editor to load this specific file
-        await waitForEditorToLoadFile(fullPath, label);
+    if (container) {
+      container.scrollTop = 0;
+      await sleep(150);
+    }
 
+    addLog(`📋 총 ${orderedFiles.length}개 파일 명단(Manifest) 확정 완료!`, "success");
+    return orderedFiles;
+  }
+
+  // Phase 3: Targeted File Collection (Reliably scrolls to and opens each file from Manifest)
+  async function collectFilesFromManifest(manifestFiles, stateCache = {}) {
+    const files = {};
+    const container = getTreeScrollContainer();
+    const totalFiles = manifestFiles.length;
+
+    if (container) {
+      container.scrollTop = 0;
+      await sleep(150);
+    }
+
+    for (let index = 0; index < totalFiles; index++) {
+      if (shouldAbort) break;
+
+      const { path: fullPath, label } = manifestFiles[index];
+      const progressPercent = Math.round(((index + 1) / totalFiles) * 90);
+
+      updateProgress(
+        progressPercent,
+        fullPath,
+        `파일 수집 중 (${index + 1}/${totalFiles}개)`
+      );
+
+      // 1. 메모리 캐시 확인 (있으면 클릭 없이 즉시 저장)
+      const cachedCode =
+        stateCache[fullPath] !== undefined
+          ? stateCache[fullPath]
+          : stateCache[`/${fullPath}`] !== undefined
+          ? stateCache[`/${fullPath}`]
+          : !fullPath.includes("/") && stateCache[label] !== undefined
+          ? stateCache[label]
+          : undefined;
+
+      if (cachedCode !== undefined && cachedCode !== null) {
+        files[fullPath] = cachedCode;
+        const previewSnippet = typeof cachedCode === "string" ? cachedCode.replace(/\s+/g, " ").slice(0, 35) : "asset";
+        addLog(`✔ [${index + 1}/${totalFiles}][캐시] ${fullPath} [${previewSnippet}...]`, "info");
+        continue;
+      }
+
+      // 2. DOM에서 target button 찾기
+      let targetBtn = findTreeElementByPath(fullPath, label);
+
+      // 현재 화면에 없다면 가상 스크롤로 탐색 (Search scroll)
+      if (!targetBtn && container) {
+        targetBtn = await searchAndScrollToItem(container, fullPath, label);
+      }
+
+      if (!targetBtn) {
+        addLog(`⚠ [${index + 1}/${totalFiles}] ${fullPath} 요소를 트리에서 찾지 못함`, "warning");
+        files[fullPath] = `// Error: Item not found in tree: ${fullPath}`;
+        continue;
+      }
+
+      // 3. 클릭 및 로드 대기
+      targetBtn.scrollIntoView({ block: "center" });
+      await sleep(50);
+      targetBtn.click();
+
+      await waitForEditorToLoadFile(fullPath, label);
+
+      // 4. 소스코드 추출 (실패 시 1회 재시도)
+      let extracted = false;
+      for (let attempt = 1; attempt <= 2 && !extracted; attempt++) {
         try {
           const isBinaryAsset = /\.(jpg|jpeg|png|webp|gif|ico|bmp|woff|woff2|ttf|eot)$/i.test(fullPath);
           if (isBinaryAsset) {
             const imgContent = await tryGetImageContent(fullPath);
             files[fullPath] = imgContent || "// Asset: " + fullPath;
-            addLog(`✔ [에셋] ${fullPath}`, "info");
+            addLog(`✔ [${index + 1}/${totalFiles}][에셋] ${fullPath}`, "info");
+            extracted = true;
           } else {
             const content = await getEditorContentRobust(fullPath, label);
             if (content !== null && content !== undefined && (content.length > 0 || !fullPath.endsWith(".svg"))) {
               files[fullPath] = content;
               const previewSnippet = content.replace(/\s+/g, " ").slice(0, 35);
-              addLog(`✔ ${fullPath} (${content.length} B) [${previewSnippet}...]`, "info");
+              addLog(`✔ [${index + 1}/${totalFiles}] ${fullPath} (${content.length} B) [${previewSnippet}...]`, "info");
+              extracted = true;
             } else if (fullPath.endsWith(".svg")) {
               const svgContent = await tryGetImageContent(fullPath);
               files[fullPath] = svgContent || content || "";
-              addLog(`✔ [에셋-SVG] ${fullPath}`, "info");
+              addLog(`✔ [${index + 1}/${totalFiles}][에셋-SVG] ${fullPath}`, "info");
+              extracted = true;
             } else {
-              addLog(`⚠ ${fullPath} 빈 내용 또는 접근 불가`, "warning");
-              files[fullPath] = "";
+              if (attempt === 1) {
+                targetBtn.click();
+                await sleep(400);
+              } else {
+                addLog(`⚠ [${index + 1}/${totalFiles}] ${fullPath} 빈 내용 또는 접근 불가`, "warning");
+                files[fullPath] = "";
+                extracted = true;
+              }
             }
           }
         } catch (err) {
-          addLog(`⚠ ${fullPath} 수집 실패: ${err.message}`, "warning");
-          files[fullPath] = `// Error reading file: ${err.message}`;
+          if (attempt === 1) {
+            await sleep(300);
+          } else {
+            addLog(`⚠ [${index + 1}/${totalFiles}] ${fullPath} 수집 실패: ${err.message}`, "warning");
+            files[fullPath] = `// Error reading file: ${err.message}`;
+            extracted = true;
+          }
         }
-      }
-
-      currentScroll += scrollStep;
-      if (container && currentScroll > container.scrollHeight + 100) {
-        break;
       }
     }
 
     return files;
+  }
+
+  // Deterministically collect all files with monotonic top-to-bottom virtual scroll (Manifest-first)
+  async function collectAllTreeFiles(stateCache = {}) {
+    const manifestFiles = await scanAllTreeFilesManifest();
+    return await collectFilesFromManifest(manifestFiles, stateCache);
   }
 
   // Wait for the editor to reflect the clicked file before extracting code (eliminates race condition)
