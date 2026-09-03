@@ -68,38 +68,32 @@
 
   // Helper: Find editor-scoped Copy Button (prevents clicking chat message copy buttons)
   function findEditorScopedCopyButton() {
-    // 1. Check code editor containers and their header toolbars
+    // 1. Document-wide query strictly for file-copy specific labels (Highest safety)
+    const specificCopyBtn = document.querySelector(
+      "button[aria-label='Copy file content'], button[aria-label='Copy code'], button[title='Copy file content'], button[title='Copy code'], button[aria-label='코드 복사']"
+    );
+    if (specificCopyBtn) return specificCopyBtn;
+
+    // 2. Check code editor containers and their header toolbars
     const editorContainers = document.querySelectorAll(
       ".cm-editor, [data-editor], .monaco-editor, .code-viewer, [data-testid*='code'], [data-testid*='editor']"
     );
 
     for (const container of editorContainers) {
       let headerArea = container.parentElement;
-      for (let i = 0; i < 5 && headerArea; i++) {
-        const copyBtn = headerArea.querySelector(
-          "button[aria-label*='Copy'], button[aria-label*='copy'], button[title*='Copy'], button[title*='copy'], button[aria-label*='복사'], button[title*='복사']"
+      for (let i = 0; i < 4 && headerArea; i++) {
+        const copyBtns = headerArea.querySelectorAll(
+          "button[aria-label*='Copy' i], button[title*='Copy' i], button[aria-label*='복사'], button[title*='복사']"
         );
-        if (copyBtn) return copyBtn;
+        for (const btn of copyBtns) {
+          const l = (btn.getAttribute("aria-label") || btn.getAttribute("title") || "").toLowerCase();
+          if (!l.includes("preview") && !l.includes("미리보기") && !l.includes("link") && !l.includes("url")) {
+            return btn;
+          }
+        }
         headerArea = headerArea.parentElement;
       }
     }
-
-    // 2. Check main code panel area (excluding chat panels)
-    const codePanels = document.querySelectorAll(
-      "main [data-panel-group] [data-panel]:last-child, .code-editor-wrapper, [data-radix-scroll-area-viewport] ~ div, [data-panel-id*='editor']"
-    );
-    for (const panel of codePanels) {
-      const copyBtn = panel.querySelector(
-        "button[aria-label*='Copy'], button[aria-label*='copy'], button[title*='Copy'], button[title*='copy'], button[aria-label*='복사'], button[title*='복사']"
-      );
-      if (copyBtn) return copyBtn;
-    }
-
-    // 3. Document-wide query strictly for file-copy specific labels
-    const specificCopyBtn = document.querySelector(
-      "button[aria-label='Copy file content'], button[aria-label='Copy code'], button[title='Copy file content'], button[title='Copy code'], button[aria-label='코드 복사']"
-    );
-    if (specificCopyBtn) return specificCopyBtn;
 
     return null;
   }

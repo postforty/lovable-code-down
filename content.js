@@ -1,14 +1,14 @@
 /**
- * Lovable Code Downloader - Content Script (v1.3.3)
+ * Lovable Code Downloader - Content Script (v1.4.0)
  * Zero-Loss Manifest-First Virtualized Tree Crawler & Precision Multi-Tier Code Extractor.
- * [v1.3.3] Universal Virtual Tree Scroller & Text Target Clicking with Escape Key Popup Protection.
+ * [v1.4.0] Multi-Pass Bidirectional Full Sweep & Iterative Scroll Pump for 100% Manifest Discovery.
  */
 
 (function () {
   if (window.__LOVABLE_CODE_DOWNLOADER_INJECTED__) return;
   window.__LOVABLE_CODE_DOWNLOADER_INJECTED__ = true;
 
-  console.log("⚡ Lovable Code Downloader (v1.3.3) active.");
+  console.log("⚡ Lovable Code Downloader (v1.4.0) active.");
 
   let isExtracting = false;
   let shouldAbort = false;
@@ -349,21 +349,50 @@
 
   // Ensure "Code" / "코드" tab is clicked and active
   async function ensureCodeViewActive() {
-    const allButtons = Array.from(document.querySelectorAll("button, [role='tab'], div[role='button'], a"));
+    const allButtons = Array.from(
+      document.querySelectorAll("button, [role='tab'], div[role='button'], a, [data-state]")
+    );
+
     const codeTab = allButtons.find((el) => {
-      const text = el.textContent || "";
-      return text.includes("코드") || text.includes("Code") || el.innerHTML.includes("</>");
+      const label = (el.getAttribute("aria-label") || el.getAttribute("title") || "").toLowerCase();
+      const text = (el.textContent || "").trim();
+      const html = el.innerHTML || "";
+      return (
+        label === "code" ||
+        label.includes("코드") ||
+        label.includes("show code") ||
+        text === "코드" ||
+        text === "Code" ||
+        text === "</>" ||
+        html.includes("</>") ||
+        html.includes("16 18 22 12 16 6") ||
+        html.includes("m16 18 6-6-6-6") ||
+        html.includes("M16 18L22 12L16 6")
+      );
     });
 
+    const previewTab = allButtons.find((el) => {
+      const label = (el.getAttribute("aria-label") || el.getAttribute("title") || "").toLowerCase();
+      const text = (el.textContent || "").trim();
+      return text.includes("미리보기") || label.includes("preview") || text.includes("Preview");
+    });
+
+    const isPreviewActive =
+      previewTab &&
+      (previewTab.getAttribute("aria-selected") === "true" ||
+        previewTab.getAttribute("data-state") === "active" ||
+        previewTab.classList.contains("active"));
+
     if (codeTab) {
-      const isSelected =
+      const isCodeSelected =
         codeTab.getAttribute("aria-selected") === "true" ||
         codeTab.classList.contains("active") ||
         codeTab.getAttribute("data-state") === "active";
-      if (!isSelected) {
-        addLog("코드 탭을 활성화합니다.", "info");
+
+      if (!isCodeSelected || isPreviewActive) {
+        addLog("코드(</>) 탭을 활성화합니다.", "info");
         codeTab.click();
-        await sleep(600);
+        await sleep(500);
       }
     }
   }
@@ -449,7 +478,8 @@
     return scrolled;
   }
 
-  function resetTreeToTop() {
+  // Reset tree scroll to absolute top with iterative scroll pumping to force virtualization re-render
+  async function resetTreeToTop() {
     const candidateSelectors = [
       "[data-file-tree-virtualized-scroll='true']",
       "[data-file-tree-virtualized-scroll]",
@@ -463,12 +493,31 @@
       "aside .overflow-y-auto"
     ];
 
+    // Phase 1: Set scrollTop = 0 on all containers and dispatch scroll events
     for (const sel of candidateSelectors) {
       const el = document.querySelector(sel);
       if (el) {
         el.scrollTop = 0;
         el.dispatchEvent(new Event("scroll", { bubbles: true }));
       }
+    }
+    await sleep(100);
+
+    // Phase 2: Pump scroll events repeatedly to force virtualized re-render at top
+    for (let pump = 0; pump < 3; pump++) {
+      for (const sel of candidateSelectors) {
+        const el = document.querySelector(sel);
+        if (el) {
+          el.scrollTop = 0;
+          el.dispatchEvent(new Event("scroll", { bubbles: true }));
+        }
+      }
+      // Also try scrollIntoView on the first visible tree item
+      const firstItems = getAllTreeElements();
+      if (firstItems.length > 0) {
+        firstItems[0].scrollIntoView({ block: "start", behavior: "instant" });
+      }
+      await sleep(80);
     }
   }
 
@@ -903,8 +952,8 @@
       let openedInThisPass = 0;
 
       // Reset to top
-      resetTreeToTop();
-      await sleep(150);
+      await resetTreeToTop();
+      await sleep(200);
 
       let noNewElementsStreak = 0;
       let pathStack = [];
@@ -978,7 +1027,7 @@
       }
     }
 
-    resetTreeToTop();
+    await resetTreeToTop();
     await sleep(200);
     addLog(`✨ 총 ${totalOpened}개 폴더 확장 완료. 파일 명단 전수 스캔을 준비합니다.`, "success");
   }
@@ -1041,46 +1090,88 @@
 
   // Backup search: scrolls through entire virtual tree from top to bottom if progressive search missed an item
   async function fallbackSearchItem(targetPath, targetLabel) {
-    resetTreeToTop();
-    await sleep(150);
+    await resetTreeToTop();
+    await sleep(200);
+
+    // 스크롤 컨테이너의 실제 높이 기반으로 필요한 탐색 횟수를 동적 계산
+    const scrollContainer = getTreeScrollContainer();
+    const scrollStep = 90;
+    const totalHeight = scrollContainer ? scrollContainer.scrollHeight : 5000;
+    const maxAttempts = Math.max(60, Math.ceil(totalHeight / scrollStep) + 10);
 
     let attempts = 0;
-    while (attempts < 50) {
+    while (attempts < maxAttempts) {
       if (shouldAbort) break;
       attempts++;
 
       const found = findTreeElementByPath(targetPath, targetLabel);
       if (found) return found;
 
-      scrollTreeVertically(90);
+      const didScroll = scrollTreeVertically(scrollStep);
       const visible = getAllTreeElements();
       if (visible.length > 0) {
         visible[visible.length - 1].scrollIntoView({ block: "end", behavior: "instant" });
       }
+
+      // 더 이상 스크롤할 수 없으면 트리 끝에 도달한 것이므로 조기 종료
+      if (!didScroll) break;
+
       await sleep(120);
     }
     return findTreeElementByPath(targetPath, targetLabel);
   }
 
-  // Phase 2: Complete Manifest Scan (Anchor Scroll, 100% loss-free discovery of all file paths)
+  // 특정 폴더 경로를 찾아 접혀 있으면 확장하는 헬퍼
+  async function expandSingleFolder(folderPath) {
+    await resetTreeToTop();
+    await sleep(200);
+
+    const scrollStep = 90;
+    const scrollContainer = getTreeScrollContainer();
+    const totalHeight = scrollContainer ? scrollContainer.scrollHeight : 5000;
+    const maxAttempts = Math.max(60, Math.ceil(totalHeight / scrollStep) + 10);
+
+    for (let attempt = 0; attempt < maxAttempts; attempt++) {
+      if (shouldAbort) break;
+
+      const visibleItems = getAllTreeElements();
+      for (const btn of visibleItems) {
+        const label = getLabel(btn);
+        if (!label) continue;
+        const explicitPath = getItemExplicitPath(btn, label);
+        const { isFolder, isOpen } = classifyTreeItem(btn, label);
+
+        if (isFolder && (explicitPath === folderPath || label === folderPath.split("/").pop())) {
+          if (!isOpen) {
+            const trigger =
+              btn.querySelector("[aria-expanded], [data-state], button:not([aria-label*='more' i]):not([aria-label*='action' i]):not([aria-label*='option' i])") ||
+              btn;
+            trigger.click();
+            await sleep(300);
+          }
+          return true;
+        }
+      }
+
+      const didScroll = scrollTreeVertically(scrollStep);
+      if (!didScroll) break;
+      await sleep(120);
+    }
+    return false;
+  }
+
+  // Phase 2: Complete Manifest Scan (Multi-Pass Bidirectional Full Sweep)
   async function scanAllTreeFilesManifest() {
     const manifestSet = new Set();
     const orderedFiles = [];
 
-    resetTreeToTop();
-    await sleep(200);
-
     addLog("📋 전체 파일 명단(Manifest) 100% 무누락 전수 스캔 시작...", "info");
 
-    let noNewItemsStreak = 0;
-    const maxStreak = 7;
-    let pathStack = [];
-
-    while (noNewItemsStreak < maxStreak) {
-      if (shouldAbort) break;
-
+    // Inner helper: scan all currently visible items and record new files
+    function scanVisibleItems() {
       const visibleItems = getAllTreeElements();
-      let newDiscoveredInStep = 0;
+      let pathStack = [];
+      let newCount = 0;
 
       for (let i = 0; i < visibleItems.length; i++) {
         const btn = visibleItems[i];
@@ -1099,7 +1190,6 @@
           continue;
         }
 
-        // File: resolve full path using explicit parent path or fallback stack
         const explicitPath = getItemExplicitPath(btn, label);
         const folderPath = pathStack.map((p) => p.name).join("/");
         const fullPath = normalizePath(explicitPath || (folderPath ? `${folderPath}/${label}` : label));
@@ -1107,26 +1197,69 @@
         if (fullPath && !manifestSet.has(fullPath)) {
           manifestSet.add(fullPath);
           orderedFiles.push({ path: fullPath, label: label });
-          newDiscoveredInStep++;
+          newCount++;
         }
       }
+      return newCount;
+    }
 
-      if (newDiscoveredInStep > 0) {
-        noNewItemsStreak = 0;
+    // === Pass 1: Reset to absolute top, then sweep downward ===
+    await resetTreeToTop();
+    await sleep(300);
+
+    let noNewStreak = 0;
+    const maxStreak = 8;
+
+    while (noNewStreak < maxStreak) {
+      if (shouldAbort) break;
+      const found = scanVisibleItems();
+
+      if (found > 0) {
+        noNewStreak = 0;
       } else {
-        noNewItemsStreak++;
+        noNewStreak++;
       }
 
-      // Scroll down across all containers and elements
-      scrollTreeVertically(80);
+      scrollTreeVertically(70);
+      const visibleItems = getAllTreeElements();
       if (visibleItems.length > 0) {
         visibleItems[visibleItems.length - 1].scrollIntoView({ block: "end", behavior: "instant" });
       }
-
-      await sleep(150); // 가상화 렌더링 안정화 대기
+      await sleep(150);
     }
 
-    resetTreeToTop();
+    const afterPass1 = orderedFiles.length;
+    addLog(`📋 [1차 하향 스캔 완료] ${afterPass1}개 파일 발견`, "info");
+
+    // === Pass 2: Reset to top again and sweep downward once more (catches items that were not rendered in Pass 1) ===
+    await resetTreeToTop();
+    await sleep(300);
+
+    noNewStreak = 0;
+    while (noNewStreak < maxStreak) {
+      if (shouldAbort) break;
+      const found = scanVisibleItems();
+
+      if (found > 0) {
+        noNewStreak = 0;
+      } else {
+        noNewStreak++;
+      }
+
+      scrollTreeVertically(70);
+      const visibleItems = getAllTreeElements();
+      if (visibleItems.length > 0) {
+        visibleItems[visibleItems.length - 1].scrollIntoView({ block: "end", behavior: "instant" });
+      }
+      await sleep(150);
+    }
+
+    const afterPass2 = orderedFiles.length;
+    if (afterPass2 > afterPass1) {
+      addLog(`📋 [2차 보완 스캔 완료] 추가 ${afterPass2 - afterPass1}개 파일 발견 (총 ${afterPass2}개)`, "info");
+    }
+
+    await resetTreeToTop();
     await sleep(150);
 
     addLog(`📋 총 ${orderedFiles.length}개 파일 명단(Manifest) 확정 완료!`, "success");
@@ -1139,11 +1272,14 @@
     const totalFiles = manifestFiles.length;
 
     // Reset to top of virtual tree once before streaming downwards
-    resetTreeToTop();
-    await sleep(250);
+    await resetTreeToTop();
+    await sleep(300);
 
     for (let index = 0; index < totalFiles; index++) {
       if (shouldAbort) break;
+
+      // Ensure Code tab is active (prevents preview tab takeover)
+      await ensureCodeViewActive();
 
       const { path: fullPath, label } = manifestFiles[index];
       const progressPercent = Math.round(((index + 1) / totalFiles) * 90);
@@ -1195,24 +1331,30 @@
         targetBtn = await fallbackSearchItem(fullPath, label);
       }
 
+      // 여전히 못 찾았고, 하위 폴더 파일이면 부모 폴더가 접혔을 가능성 → 재확장 후 재탐색
+      if (!targetBtn && fullPath.includes("/")) {
+        const parentDir = fullPath.substring(0, fullPath.lastIndexOf("/"));
+        addLog(`🔄 [${index + 1}/${totalFiles}] ${parentDir} 폴더 재확장 시도...`, "info");
+        await expandSingleFolder(parentDir);
+        targetBtn = await fallbackSearchItem(fullPath, label);
+      }
+
       if (!targetBtn) {
         addLog(`⚠ [${index + 1}/${totalFiles}] ${fullPath} 요소를 트리에서 찾지 못함`, "warning");
         files[fullPath] = `// Error: Item not found in tree: ${fullPath}`;
         continue;
       }
 
-      // 3. 클릭 및 로드 대기 (텍스트 영역 타겟팅 + Escape 키 팝업 메뉴 방어)
+      // 3. 클릭 및 로드 대기 (텍스트 영역 정밀 타겟팅, Escape 키 절대 디스패치 금지)
       targetBtn.scrollIntoView({ block: "center", behavior: "instant" });
       await sleep(60);
 
       const textTarget =
         targetBtn.querySelector("span:not([aria-hidden]), [data-item-label], .tree-item-label") || targetBtn;
+      textTarget.dispatchEvent(new MouseEvent("mousedown", { bubbles: true, cancelable: true }));
+      textTarget.dispatchEvent(new MouseEvent("mouseup", { bubbles: true, cancelable: true }));
       textTarget.click();
-      await sleep(100);
-
-      // 혹시 컨텍스트 메뉴가 열렸다면 즉시 닫기
-      document.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", code: "Escape", keyCode: 27, bubbles: true }));
-      await sleep(50);
+      await sleep(150);
 
       await waitForEditorToLoadFile(fullPath, label, 1500);
 
